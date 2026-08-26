@@ -1,9 +1,6 @@
 use core::alloc::{GlobalAlloc, Layout};
 
-unsafe extern "C" {
-    pub fn pvPortMalloc(size: usize) -> *mut u8;
-    pub fn vPortFree(ptr: *mut u8);
-}
+use super::bindings::*;
 
 /// Hooking into FreeRTOS allocator to provide alloc.
 pub struct FreeRtosAllocator;
