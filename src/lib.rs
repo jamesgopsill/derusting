@@ -4,10 +4,12 @@ use core::{cell::RefCell, ptr};
 
 use critical_section::Mutex;
 use embassy_time_queue_utils::Queue;
+use embedded_io::Write;
 use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
 use static_cell::StaticCell;
 
 use crate::{
+    chanfs::{File, FileMode},
     free_rtos::{
         alloc::FreeRtosAllocator,
         bindings::{RtosTask, RtosTaskParams, xTaskGetCurrentTaskHandle},
@@ -20,6 +22,7 @@ use crate::{
 
 extern crate alloc;
 
+mod chanfs;
 mod free_rtos;
 mod log;
 mod panic;
@@ -70,6 +73,16 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
     let current_task = unsafe { xTaskGetCurrentTaskHandle() };
     if current_task.is_null() {
         log_error!("We should only be called within a FreeRTOS task.");
+    }
+
+    // A little FS test.
+    if let Some(mut file) = File::open(c"test.txt", FileMode::WRITE | FileMode::CREATE_ALWAYS) {
+        log_info!("Test File Opened");
+        if let Err(e) = file.write(b"Hello World\n") {
+            log_error!("File Error: {e}");
+        } else {
+            log_info!("File Write Complete");
+        };
     }
 
     log_info!("Initialising Executor");
