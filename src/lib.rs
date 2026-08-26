@@ -17,6 +17,10 @@ use crate::{
         task::Task,
         time_driver::FreeRtosTimeDriver,
     },
+    lwip::{
+        bindings::lwip_pcb,
+        udp::{UdpChannel, UdpProtocolControlBlock},
+    },
     tasks::heartbeat,
 };
 
@@ -25,6 +29,7 @@ extern crate alloc;
 mod chanfs;
 mod free_rtos;
 mod log;
+mod lwip;
 mod panic;
 mod tasks;
 
@@ -45,6 +50,10 @@ static TASK: AtomicPtr<RtosTask> = AtomicPtr::new(ptr::null_mut());
 
 /// Static store for our Embassy Executor.
 static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
+
+// Static handles for our UDP Service.
+static UDP_SERVICE: AtomicPtr<lwip_pcb> = AtomicPtr::new(ptr::null_mut());
+static UDP_CHANNEL: StaticCell<UdpChannel> = StaticCell::new();
 
 /// # Safety
 /// We will ensure that we call this function in an
@@ -84,6 +93,33 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
             log_info!("File Write Complete");
         };
     }
+
+    // Setting up the UDP service
+    let mut udp_channel: Option<&'static UdpChannel> = None;
+    lwip::core::with_lwip_core(|core| {
+        // UDP Service
+        if let Ok(service) = UdpProtocolControlBlock::try_from(&UDP_SERVICE) {
+            log_info!("Removing existing UDP service");
+            service.remove(&core);
+        }
+        if let Ok(pcb) = UdpProtocolControlBlock::new(&core) {
+            match pcb.bind(9000, &core) {
+                Err(_) => {
+                    log_error!("Failed to bind on 9000");
+                    pcb.remove(&core);
+                }
+                Ok(_) => {
+                    let channel = UDP_CHANNEL.init(UdpChannel::default());
+                    pcb.recv(channel, &core);
+                    log_info!("UDP Service Available on 9000...");
+                    UDP_SERVICE.store(pcb.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
+                    udp_channel = Some(channel);
+                }
+            }
+        } else {
+            log_error!("UDP block not created")
+        }
+    });
 
     log_info!("Initialising Executor");
     let executor = EXECUTOR.init(FreeRtosTaskExecutor::new(current_task as _));
