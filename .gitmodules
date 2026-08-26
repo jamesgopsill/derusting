@@ -1,0 +1,4 @@
+[submodule "buddy"]
+	path = buddy
+	url = https://github.com/prusa3d/Prusa-Firmware-Buddy.git
+	ignore = all

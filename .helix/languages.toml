@@ -1,0 +1,4 @@
+[language-server.rust-analyzer.config]
+check = { command = "clippy", extraArgs = ["--target-dir", "/dev/shm/rust/target"], allTargets = false }
+cargo = { allTargets = false }
+cfg = { setTest = false }
