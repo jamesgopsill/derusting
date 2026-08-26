@@ -24,6 +24,7 @@ embassy-executor = {
   version = "0.10",
   features = ["embassy-time-driver"]
 }
+embassy-net = "0.9"
 embassy-sync = "0.8"
 embassy-time-queue-utils = "0.3"
 embassy-time-driver = "0.2"
@@ -37,4 +38,8 @@ num_enum = {
   default-features = false
 }
 portable-atomic = "1"
+picoserve = {
+  version = "0.19",
+  features = ["embassy"]
+}
 static_cell = "2"

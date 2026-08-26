@@ -41,6 +41,7 @@ impl File {
         })
     }
 
+    #[allow(unused)]
     pub fn close(mut self) -> Result<(), FileResult> {
         let res = unsafe { f_close(self.as_mut_ptr()).into() };
         self.closed = true;

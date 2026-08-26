@@ -66,7 +66,7 @@ impl Into<Result<(), LwipError>> for LwipError {
     }
 }
 
-const TCP_WRITE_FLAG_COPY: u8 = 0x01;
+pub(super) const TCP_WRITE_FLAG_COPY: u8 = 0x01;
 const PBUF_LINK_ENCAPSULATION_HLEN: u32 = 0;
 const PBUF_LINK_HLEN: u32 = 14; // Could be an addition eth pad size
 const PBUF_IP_HLEN: u32 = 20; // could be 20 or 40  ipv4 vs. v6
@@ -125,19 +125,24 @@ pub enum PbufType {
 
 unsafe extern "C" {
     // TCP
-    fn tcp_new() -> *mut lwip_pcb;
-    fn tcp_close(pcb: *mut lwip_pcb) -> LwipError;
-    fn tcp_bind(pcb: *mut lwip_pcb, ipaddr: *const lwip_ipaddr, port: u16) -> LwipError;
-    fn tcp_listen_with_backlog(pcb: *mut lwip_pcb, backlog: u8) -> *mut lwip_pcb;
-    fn tcp_arg(pcb: *mut lwip_pcb, arg: *mut c_void);
+    pub(super) fn tcp_new() -> *mut lwip_pcb;
+    pub(super) fn tcp_close(pcb: *mut lwip_pcb) -> LwipError;
+    pub(super) fn tcp_bind(pcb: *mut lwip_pcb, ipaddr: *const lwip_ipaddr, port: u16) -> LwipError;
+    pub(super) fn tcp_listen_with_backlog(pcb: *mut lwip_pcb, backlog: u8) -> *mut lwip_pcb;
+    pub(super) fn tcp_arg(pcb: *mut lwip_pcb, arg: *mut c_void);
     // Callbacks
-    fn tcp_accept(pcb: *mut lwip_pcb, accept: Option<TcpAcceptFn>);
-    fn tcp_recv(pcb: *mut lwip_pcb, recv: Option<TcpRecvFn>);
-    fn tcp_err(pcb: *mut lwip_pcb, err: Option<LwipErrFn>);
+    pub(super) fn tcp_accept(pcb: *mut lwip_pcb, accept: Option<TcpAcceptFn>);
+    pub(super) fn tcp_recv(pcb: *mut lwip_pcb, recv: Option<TcpRecvFn>);
+    pub(super) fn tcp_err(pcb: *mut lwip_pcb, err: Option<LwipErrFn>);
     // Data
-    fn tcp_write(pcb: *mut lwip_pcb, dataptr: *const u8, len: u16, apiflags: u8) -> LwipError;
-    fn tcp_output(pcb: *mut lwip_pcb) -> LwipError;
-    fn tcp_recved(pcb: *mut lwip_pcb, len: u16);
+    pub(super) fn tcp_write(
+        pcb: *mut lwip_pcb,
+        dataptr: *const u8,
+        len: u16,
+        apiflags: u8,
+    ) -> LwipError;
+    pub(super) fn tcp_output(pcb: *mut lwip_pcb) -> LwipError;
+    pub(super) fn tcp_recved(pcb: *mut lwip_pcb, len: u16);
     // UDP
     pub(super) fn udp_new() -> *mut lwip_pcb;
     pub(super) fn udp_bind(pcb: *mut lwip_pcb, ipaddr: *const lwip_ipaddr, port: u16) -> LwipError;
