@@ -20,7 +20,7 @@ impl Task {
                 name.as_ptr(),
                 stack_depth,
                 ptr::null_mut(),
-                1, // Low priority
+                2, // Low priority
                 ptr,
             )
         };

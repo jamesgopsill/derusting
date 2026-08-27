@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+
+<body>
+  <input type="file" id="f">
+  <button onclick="
+    let file = document.getElementById('f').files[0];
+    fetch('/', {
+      method: 'PUT',
+      headers: { 'x-fname': file.name },
+      body: file
+    });
+  ">Upload G-code</button>
+</body>
+
+</html>

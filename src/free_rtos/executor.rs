@@ -40,7 +40,7 @@ impl FreeRtosTaskExecutor {
 /// The pender is the function that is used to wake the FreeRTOS
 /// task that the executor resides within.
 #[unsafe(export_name = "__pender")]
-fn __pender(context: *mut c_void) {
+pub fn __pender(context: *mut c_void) {
     // Pender fires when a embassy-sync (Signal/Channel) gets fired.
     // This is then used in turn to wake up the executor to poll again.
     if context.is_null() {
@@ -63,6 +63,7 @@ fn __pender(context: *mut c_void) {
             xTaskGenericNotifyFromISR(
                 task_handle,
                 0,
+                0,
                 2,
                 ptr::null_mut(),
                 &mut higher_priority_task_woken,
@@ -76,7 +77,7 @@ fn __pender(context: *mut c_void) {
         }
     } else {
         unsafe {
-            xTaskGenericNotify(task_handle, 0, 2, ptr::null_mut());
+            xTaskGenericNotify(task_handle, 0, 0, 2, ptr::null_mut());
         }
     }
 }

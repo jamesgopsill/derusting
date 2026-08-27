@@ -20,7 +20,8 @@ unsafe extern "C" {
 
     pub fn xTaskGenericNotify(
         task: *mut RtosTask,
-        index: u32,  // index to notify (usually 0)
+        index: u32, // index to notify (usually 0)
+        ul_value: u32,
         action: u32, // eNotifyAction (2 = eIncrement)
         previous_notification: *mut u32,
     ) -> i32;
@@ -28,6 +29,7 @@ unsafe extern "C" {
     pub fn xTaskGenericNotifyFromISR(
         task: *mut c_void,
         index: u32,
+        ul_value: u32,
         action: u32,
         previous_notification: *mut u32,
         pxHigherPriorityTaskWoken: *mut i32,

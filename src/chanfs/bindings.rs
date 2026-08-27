@@ -17,7 +17,7 @@ unsafe extern "C" {
 #[repr(C)]
 #[repr(align(8))]
 pub struct Fil {
-    _opaque: [u8; 768], // Opaque + padding to ensure there is enough space for the C struct
+    _opaque: [u8; 1024], // Opaque + padding to ensure there is enough space for the C struct
 }
 
 #[repr(u32)]

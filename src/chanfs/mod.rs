@@ -1,12 +1,20 @@
-use core::ffi::{CStr, c_uint};
-
-use alloc::boxed::Box;
+use core::{
+    cell::RefCell,
+    ffi::{CStr, c_uint},
+    mem::MaybeUninit,
+};
 
 mod bindings;
 
 use bindings::*;
+use critical_section::Mutex;
 
-use crate::log_error;
+use crate::{log_error, log_info};
+
+static FILE: Mutex<RefCell<File>> = Mutex::new(RefCell::new(File {
+    is_open: false,
+    inner: MaybeUninit::uninit(),
+}));
 
 bitflags::bitflags! {
     pub struct FileMode: u8 {
@@ -20,74 +28,81 @@ bitflags::bitflags! {
     }
 }
 
-pub struct File {
-    inner: Box<core::mem::MaybeUninit<Fil>>,
-    closed: bool,
+struct File {
+    is_open: bool,
+    inner: MaybeUninit<Fil>,
 }
 
-impl File {
-    pub fn open(path: &CStr, mode: FileMode) -> Option<Self> {
-        let mut file = Box::<Fil>::new_uninit();
-        let fp = file.as_mut_ptr();
-        let res = unsafe { f_open(fp, path.as_ptr(), mode.bits()) };
-        let res: Result<(), FileResult> = res.into();
-        if let Err(e) = res {
-            log_error!("File Error: {:?}", e);
-            return None;
-        }
-        Some(Self {
-            inner: file,
-            closed: false,
+pub struct FileLock();
+
+impl FileLock {
+    pub fn open(path: &CStr, mode: FileMode) -> Result<Self, FileResult> {
+        critical_section::with(|cs| {
+            let mut file = FILE.borrow(cs).borrow_mut();
+            if file.is_open {
+                return Err(FileResult::TooManyOpenFiles);
+            }
+            let fp = file.inner.as_mut_ptr();
+            let res = unsafe { f_open(fp, path.as_ptr(), mode.bits()) };
+            if res != FileResult::Ok {
+                return Err(res);
+            }
+            file.is_open = true;
+            Ok(Self())
         })
     }
 
-    #[allow(unused)]
-    pub fn close(mut self) -> Result<(), FileResult> {
-        let res = unsafe { f_close(self.as_mut_ptr()).into() };
-        self.closed = true;
-        res
-    }
-
-    fn as_mut_ptr(&mut self) -> *mut Fil {
-        self.inner.as_mut_ptr()
-    }
-}
-
-impl Drop for File {
-    fn drop(&mut self) {
-        if !self.closed {
-            unsafe { f_close(self.as_mut_ptr()) };
-        }
-    }
-}
-
-impl embedded_io::ErrorType for File {
-    type Error = FileResult;
-}
-
-impl embedded_io::Read for File {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
-        let fp = self.as_mut_ptr();
-        let mut bytes_read: c_uint = 0;
-        let res = unsafe { f_read(fp, buf.as_mut_ptr(), buf.len() as c_uint, &mut bytes_read) };
-        let res: Result<(), FileResult> = res.into();
-        res?;
-        Ok(bytes_read as usize)
-    }
-}
-
-impl embedded_io::Write for File {
-    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        let fp = self.as_mut_ptr();
+    pub fn write(&self, buf: &[u8]) -> Result<usize, FileResult> {
+        let fp = critical_section::with(|cs| {
+            let mut file = FILE.borrow(cs).borrow_mut();
+            if !file.is_open {
+                return Err(FileResult::NoFile);
+            }
+            Ok(file.inner.as_mut_ptr())
+        })?;
+        log_info!("Here (1)");
         let mut bytes_written: c_uint = 0;
+        log_info!("Here (2)");
         let res = unsafe { f_write(fp, buf.as_ptr(), buf.len() as c_uint, &mut bytes_written) };
-        let res: Result<(), FileResult> = res.into();
-        res?;
+        log_info!("Here (3)");
+        if res != FileResult::Ok {
+            return Err(res);
+        }
         Ok(bytes_written as usize)
     }
 
-    fn flush(&mut self) -> Result<(), Self::Error> {
-        let fp = self.as_mut_ptr();
-        unsafe { f_sync(fp).into() }
+    pub fn close(self) -> Result<(), FileResult> {
+        critical_section::with(|cs| {
+            let mut file = FILE.borrow(cs).borrow_mut();
+            if file.is_open {
+                return Ok(());
+            }
+            let fp = file.inner.as_mut_ptr();
+            let res = unsafe { f_close(fp) };
+            if res != FileResult::Ok {
+                return Err(res);
+            }
+            file.is_open = false;
+            Ok(())
+        })
+    }
+}
+
+pub fn test_file() {
+    if let Ok(flock) = FileLock::open(
+        c"test.txt",
+        FileMode::READ | FileMode::WRITE | FileMode::CREATE_ALWAYS,
+    ) {
+        log_info!("Test File Opened");
+        if let Err(e) = flock.write(b"Hello World\n") {
+            log_error!("File write error: {e}");
+        } else {
+            log_info!("File Write Complete");
+        };
+        if let Err(e) = flock.close() {
+            log_error!("File close error: {e}");
+        } else {
+            log_info!("File Closed");
+        };
     }
 }

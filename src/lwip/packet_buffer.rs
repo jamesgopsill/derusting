@@ -52,6 +52,19 @@ impl PacketBuffer {
         self.as_vec()
     }
 
+    pub fn as_array(&self) -> (usize, [u8; 1024]) {
+        let mut data = [0u8; 1024];
+        let copied = unsafe {
+            pbuf_copy_partial(
+                self.inner as *const lwip_pbuf,
+                data.as_mut_ptr(),
+                data.len() as u16,
+                0,
+            )
+        };
+        (copied as usize, data)
+    }
+
     pub fn write(&self, data: &[u8]) {
         let pbuf = unsafe { &mut *self.inner };
         unsafe {
