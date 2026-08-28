@@ -8,6 +8,7 @@ use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
 use static_cell::StaticCell;
 
 use crate::{
+    chanfs::test_file,
     free_rtos::{
         alloc::FreeRtosAllocator,
         bindings::{RtosTask, RtosTaskParams, vTaskDelay, xTaskGetCurrentTaskHandle},
@@ -15,7 +16,7 @@ use crate::{
         task::Task,
         time_driver::FreeRtosTimeDriver,
     },
-    lwip::init_tcp_service,
+    lwip::{init_tcp_service, init_udp_service},
     tasks::{heartbeat, tcp_task},
 };
 
@@ -55,8 +56,8 @@ pub unsafe extern "C" fn derusting_main() {
     log_info!("derusting_main()");
     match Task::try_from(&TASK) {
         Ok(_) => log_info!("Embassy has been created"),
-        // No task (i.e., null ptr) so create it (2056)
-        Err(_) => match Task::new(c"Embassy", 2056, 5, embassy) {
+        // No task (i.e., null ptr) so create it (1024)
+        Err(_) => match Task::new(c"Embassy", 512 * 4, 5, embassy) {
             Ok(t) => {
                 log_info!("Embassy task created.");
                 TASK.store(t.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
@@ -73,6 +74,7 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
     unsafe {
         vTaskDelay(5 * 1_000);
     }
+    log_info!("Rust Waking up...");
 
     let current_task = unsafe { xTaskGetCurrentTaskHandle() };
     if current_task.is_null() {
@@ -80,9 +82,11 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
     }
 
     // A little FS test.
-    // test_file();
+    log_info!("FS Test");
+    test_file();
+    test_file();
 
-    // let _udp_channel = init_udp_service();
+    let _udp_sock = init_udp_service();
     let tcp_sock = init_tcp_service();
 
     log_info!("Initialising Executor");

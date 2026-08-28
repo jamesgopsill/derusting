@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub struct TcpSocket {
-    pub packets: Channel<CriticalSectionRawMutex, Option<TcpPacket>, 3>,
+    pub packets: Channel<CriticalSectionRawMutex, Option<TcpPacket>, 2>,
     pub pcb: Mutex<CriticalSectionRawMutex, RefCell<Option<TcpProtocolControlBlock>>>,
 }
 

@@ -15,7 +15,6 @@ pub unsafe extern "C" fn on_tcp_accept(
     pcb: *mut lwip_pcb,
     err: LwipError,
 ) -> LwipError {
-    log_info!("on_tcp_accept()");
     if err != LwipError::Ok {
         log_error!("TCPError");
         return LwipError::Ok;
@@ -48,7 +47,6 @@ pub unsafe extern "C" fn on_tcp_recv(
     pbuf: *mut lwip_pbuf,
     _err: LwipError,
 ) -> LwipError {
-    log_info!("on_tcp_recv");
     if arg.is_null() {
         return LwipError::Ok;
     }
@@ -56,17 +54,17 @@ pub unsafe extern "C" fn on_tcp_recv(
 
     let Ok(pbuf) = PacketBuffer::try_from(pbuf) else {
         log_info!("Remote host closed connection");
-        let _ = sock.close();
+        sock.close();
         return LwipError::Ok;
     };
 
     let len = pbuf.total_len();
     let packet = pbuf.into_tcp_packet();
     if sock.packets.try_send(Some(packet)).is_ok() {
-        log_info!("Sent");
         sock.recevd_in_lwip_thread(len);
         LwipError::Ok
     } else {
+        log_error!("Channel full");
         LwipError::Mem
     }
 }
@@ -75,7 +73,7 @@ pub unsafe extern "C" fn on_tcp_recv(
 unsafe extern "C" fn on_tcp_err(arg: *mut c_void, _err: LwipError) {
     if !arg.is_null() {
         let sock = unsafe { &*(arg as *const super::TcpSocket) };
-        let _ = sock.close();
+        sock.close();
     }
 }
 

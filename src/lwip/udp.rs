@@ -1,7 +1,7 @@
-use core::{ffi::c_void, sync::atomic::Ordering};
+use core::{cell::RefCell, ffi::c_void, sync::atomic::Ordering};
 
 use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
+    blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
     channel::{Channel, TrySendError},
 };
 use portable_atomic::AtomicPtr;
@@ -52,12 +52,12 @@ impl UdpProtocolControlBlock {
         err.into()
     }
 
-    pub fn recv(&self, channel: &'static UdpChannel, _core: &LwipCore) {
+    pub fn recv(&self, sock: &'static UdpSocket, _core: &LwipCore) {
         unsafe {
             udp_recv(
                 self.as_mut_ptr(),
                 Some(on_udp_recv),
-                channel as *const _ as *mut c_void,
+                sock as *const _ as *mut c_void,
             )
         };
     }
@@ -84,25 +84,17 @@ pub struct UdpDatagram {
     pub packet: UdpPacket,
 }
 
-pub struct UdpChannel {
-    inner: Channel<CriticalSectionRawMutex, UdpDatagram, 5>,
+pub struct UdpSocket {
+    pub packets: Channel<CriticalSectionRawMutex, UdpDatagram, 2>,
+    pub pcb: Mutex<CriticalSectionRawMutex, RefCell<UdpProtocolControlBlock>>,
 }
 
-impl Default for UdpChannel {
-    fn default() -> Self {
+impl UdpSocket {
+    pub fn new(pcb: UdpProtocolControlBlock) -> Self {
         Self {
-            inner: Channel::new(),
+            packets: Channel::new(),
+            pcb: Mutex::new(RefCell::new(pcb)),
         }
-    }
-}
-
-impl UdpChannel {
-    pub fn try_send(&self, msg: UdpDatagram) -> Result<(), TrySendError<UdpDatagram>> {
-        self.inner.try_send(msg)
-    }
-
-    pub async fn receive(&self) -> UdpDatagram {
-        self.inner.receive().await
     }
 }
 
@@ -117,7 +109,7 @@ unsafe extern "C" fn on_udp_recv(
     if arg.is_null() {
         return;
     }
-    let channel = unsafe { &*(arg as *const UdpChannel) };
+    let socket = unsafe { &*(arg as *const UdpSocket) };
 
     let Ok(pb) = PacketBuffer::try_from(pbuf) else {
         return;
@@ -132,6 +124,5 @@ unsafe extern "C" fn on_udp_recv(
         packet: pb.into_udp_packet(),
     };
 
-    // Do not hold up the callback. We may drop.
-    channel.try_send(msg);
+    let _ = socket.packets.try_send(msg);
 }

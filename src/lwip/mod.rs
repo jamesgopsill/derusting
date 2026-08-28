@@ -11,7 +11,7 @@ use crate::{
         callbacks::on_tcp_accept,
         tcp::TcpProtocolControlBlock,
         tcp_socket::TcpSocket,
-        udp::{UdpChannel, UdpProtocolControlBlock},
+        udp::{UdpProtocolControlBlock, UdpSocket},
     },
 };
 
@@ -25,21 +25,15 @@ pub mod tcp_socket;
 pub mod udp;
 
 // Static handles for our UDP Service.
-pub static UDP_SERVICE: AtomicPtr<bindings::lwip_pcb> = AtomicPtr::new(ptr::null_mut());
-pub static UDP_CHANNEL: StaticCell<UdpChannel> = StaticCell::new();
+pub static UDP_SOCKET: StaticCell<UdpSocket> = StaticCell::new();
 
 // Static handles for our TCP Service.
 pub static TCP_SERVICE_PCB: AtomicPtr<lwip_pcb> = AtomicPtr::new(ptr::null_mut());
 pub static TCP_SOCKET: StaticCell<TcpSocket> = StaticCell::new();
 
-pub fn init_udp_service() -> Option<&'static UdpChannel> {
-    let mut udp_channel: Option<&'static UdpChannel> = None;
+pub fn init_udp_service() -> Option<&'static UdpSocket> {
+    let mut sock: Option<&'static UdpSocket> = None;
     lwip::core::with_lwip_core(|core| {
-        // UDP Service
-        if let Ok(service) = UdpProtocolControlBlock::try_from(&UDP_SERVICE) {
-            log_info!("Removing existing UDP service");
-            service.remove(&core);
-        }
         if let Ok(pcb) = UdpProtocolControlBlock::new(&core) {
             match pcb.bind(9000, &core) {
                 Err(_) => {
@@ -47,18 +41,17 @@ pub fn init_udp_service() -> Option<&'static UdpChannel> {
                     pcb.remove(&core);
                 }
                 Ok(_) => {
-                    let channel = UDP_CHANNEL.init(UdpChannel::default());
-                    pcb.recv(channel, &core);
+                    let s = UDP_SOCKET.init(UdpSocket::new(pcb));
+                    s.pcb.lock(|rc| rc.borrow_mut().recv(s, &core));
                     log_info!("UDP Service Available on 9000...");
-                    UDP_SERVICE.store(pcb.as_mut_ptr(), Ordering::SeqCst);
-                    udp_channel = Some(channel);
+                    sock = Some(s);
                 }
             }
         } else {
             log_error!("UDP block not created")
         }
     });
-    udp_channel
+    sock
 }
 
 pub fn init_tcp_service() -> &'static TcpSocket {

@@ -7,11 +7,11 @@ use core::{
 mod bindings;
 
 use bindings::*;
-use critical_section::Mutex;
+use embassy_sync::blocking_mutex::{Mutex, raw::ThreadModeRawMutex};
 
 use crate::{log_error, log_info};
 
-static FILE: Mutex<RefCell<File>> = Mutex::new(RefCell::new(File {
+static FILE: Mutex<ThreadModeRawMutex, RefCell<File>> = Mutex::new(RefCell::new(File {
     is_open: false,
     inner: MaybeUninit::uninit(),
 }));
@@ -37,8 +37,8 @@ pub struct FileLock();
 
 impl FileLock {
     pub fn open(path: &CStr, mode: FileMode) -> Result<Self, FileResult> {
-        critical_section::with(|cs| {
-            let mut file = FILE.borrow(cs).borrow_mut();
+        FILE.lock(|f| {
+            let mut file = f.borrow_mut();
             if file.is_open {
                 return Err(FileResult::TooManyOpenFiles);
             }
@@ -53,35 +53,47 @@ impl FileLock {
     }
 
     pub fn write(&self, buf: &[u8]) -> Result<usize, FileResult> {
-        let fp = critical_section::with(|cs| {
-            let mut file = FILE.borrow(cs).borrow_mut();
+        FILE.lock(|f| {
+            let mut file = f.borrow_mut();
             if !file.is_open {
                 return Err(FileResult::NoFile);
             }
-            Ok(file.inner.as_mut_ptr())
-        })?;
-        let mut bytes_written: c_uint = 0;
-        let res = unsafe { f_write(fp, buf.as_ptr(), buf.len() as c_uint, &mut bytes_written) };
-        if res != FileResult::Ok {
-            return Err(res);
-        }
-        Ok(bytes_written as usize)
-    }
-
-    pub fn close(self) -> Result<(), FileResult> {
-        critical_section::with(|cs| {
-            let mut file = FILE.borrow(cs).borrow_mut();
-            if file.is_open {
-                return Ok(());
-            }
             let fp = file.inner.as_mut_ptr();
-            let res = unsafe { f_close(fp) };
+            let mut bytes_written: u32 = 0;
+            let res = unsafe { f_write(fp, buf.as_ptr(), buf.len() as c_uint, &mut bytes_written) };
             if res != FileResult::Ok {
                 return Err(res);
+            }
+            Ok(bytes_written as usize)
+        })
+    }
+
+    fn _close(&self) -> Result<(), FileResult> {
+        FILE.lock(|f| {
+            let mut file = f.borrow_mut();
+            if file.is_open {
+                let fp = file.inner.as_mut_ptr();
+                let res = unsafe { f_close(fp) };
+                if res != FileResult::Ok {
+                    log_error!("File Closed Error: {}", res);
+                    return Err(res);
+                }
             }
             file.is_open = false;
             Ok(())
         })
+    }
+
+    #[allow(unused)]
+    pub fn close(self) -> Result<(), FileResult> {
+        self._close()
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        log_info!("Drop Entered");
+        let _ = self._close();
     }
 }
 
@@ -95,11 +107,6 @@ pub fn test_file() {
             log_error!("File write error: {e}");
         } else {
             log_info!("File Write Complete");
-        };
-        if let Err(e) = flock.close() {
-            log_error!("File close error: {e}");
-        } else {
-            log_info!("File Closed");
         };
     }
 }

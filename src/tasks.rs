@@ -1,10 +1,13 @@
-use alloc::vec::Vec;
 use embassy_time::{Duration, Timer, WithTimeout as _};
 
 use crate::{
-    http::{BAD_REQUEST, INDEX_HTML, METHOD_NOT_ALLOWED, Method, OK, REQUEST_TIMEOUT},
+    chanfs::{FileLock, FileMode},
+    http::{
+        BAD_REQUEST, INDEX_HTML, METHOD_NOT_ALLOWED, Method, OK, REQUEST_TIMEOUT,
+        SERVICE_UNAVAILABLE,
+    },
     log_error, log_info,
-    lwip::tcp_socket::TcpSocket,
+    lwip::{packet_buffer::TcpPacket, tcp_socket::TcpSocket},
 };
 
 #[embassy_executor::task(pool_size = 1)]
@@ -21,139 +24,39 @@ pub async fn heartbeat() {
 #[embassy_executor::task(pool_size = 1)]
 pub async fn tcp_task(sock: &'static TcpSocket) {
     loop {
-        let html = detect_header(sock).await;
-
-        let (start_line, headers, body) = split_request(&html).unwrap();
-        let mut tokens = start_line.split(|&b| b == b' ');
-        let Some(method) = tokens.next() else {
+        let first_packet = detect_header(sock).await;
+        let Some((start_line, headers, body)) = split_request(first_packet.as_bytes()) else {
             sock.write_and_close(BAD_REQUEST.as_bytes());
             continue;
         };
-        let method = match method {
-            b"GET" => Method::Get,
-            b"PUT" => Method::Put,
-            _ => {
-                sock.write_and_close(METHOD_NOT_ALLOWED.as_bytes());
+        let method = match check_start_line(start_line) {
+            Ok(method) => method,
+            Err(e) => {
+                sock.write_and_close(e.as_bytes());
                 continue;
             }
         };
-
-        let Some(url) = tokens.next() else {
-            sock.write_and_close(BAD_REQUEST.as_bytes());
-            continue;
-        };
-        let Ok(url) = str::from_utf8(url) else {
-            sock.write_and_close(BAD_REQUEST.as_bytes());
-            continue;
-        };
-        if url != "/" {
-            sock.write_and_close(BAD_REQUEST.as_bytes());
-            continue;
-        }
-
-        let Ok(headers) = str::from_utf8(headers) else {
-            sock.write_and_close(BAD_REQUEST.as_bytes());
-            continue;
-        };
-
-        match (method, url) {
-            (Method::Get, "/") => {
+        match method {
+            Method::Get => {
                 log_info!("/ GET request");
                 sock.write_and_close(INDEX_HTML.as_bytes());
             }
-            (Method::Put, "/") => {
+            Method::Put => {
                 log_info!("/ PUT request");
-                let mut content_length: usize = 0;
-                let mut content_type: bool = false;
-                for line in headers.lines() {
-                    let Some((key, val)) = line.split_once(":") else {
-                        sock.write_and_close(BAD_REQUEST.as_bytes());
+                let content_length = match check_put_header(headers) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        sock.write_and_close(e.as_bytes());
                         continue;
-                    };
-                    match key.to_lowercase().as_str() {
-                        "content-length" => {
-                            let Ok(val) = val.trim().parse::<usize>() else {
-                                log_error!("Could not parse content-length");
-                                sock.write_and_close(BAD_REQUEST.as_bytes());
-                                continue;
-                            };
-                            content_length = val;
-                        }
-                        "content-type" =>
-                        {
-                            #[allow(clippy::collapsible_match)]
-                            if val.trim() == "text/x.gcode" {
-                                content_type = true;
-                            }
-                        }
-                        _ => {}
                     }
-                }
-
-                if !content_type {
-                    sock.write_and_close(BAD_REQUEST.as_bytes());
-                    continue;
-                }
-
-                if content_length == 0 {
-                    sock.write_and_close(BAD_REQUEST.as_bytes());
-                    continue;
-                }
-
-                if content_length > 1_000_000 {
-                    sock.write_and_close(BAD_REQUEST.as_bytes());
-                    return;
-                }
-
-                content_length = content_length.saturating_sub(body.len());
-
-                let mut i = 0;
-                let mut success = true;
-                while content_length != 0 {
-                    i += 1;
-                    if i % 10 == 0 {
-                        log_info!("{i} CL: {}", content_length);
-                    }
-                    match sock
-                        .packets
-                        .receive()
-                        .with_timeout(Duration::from_millis(1_000))
-                        .await
-                    {
-                        Ok(Some(packet)) => {
-                            let bytes = packet.as_bytes();
-                            let to_write = core::cmp::min(content_length, bytes.len());
-                            // TODO: write to file
-                            content_length = content_length.saturating_sub(to_write);
-                        }
-                        Ok(None) => {
-                            log_info!("Connection Reset");
-                            success = false;
-                            // Reset by someone else
-                            break;
-                        }
-                        Err(_) => {
-                            log_info!("Timeout");
-                            sock.write_and_close(REQUEST_TIMEOUT.as_bytes());
-                            success = false;
-                            break;
-                        }
-                    };
-                }
-                log_info!("Finished: {success}");
-                if success {
-                    sock.write_and_close(OK.as_bytes());
-                }
-            }
-            (_, _) => {
-                log_info!("Unsupported Route");
-                sock.write_and_close(BAD_REQUEST.as_bytes());
+                };
+                handle_put(content_length, body, sock).await;
             }
         }
     }
 }
 
-fn split_request(buf: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
+fn split_request(buf: &[u8]) -> Option<(&str, &str, &[u8])> {
     let delim = b"\r\n";
     let idx = buf.windows(delim.len()).position(|win| win == delim)?;
     let (start_line, rest) = buf.split_at(idx);
@@ -162,24 +65,156 @@ fn split_request(buf: &[u8]) -> Option<(&[u8], &[u8], &[u8])> {
     let idx = rest.windows(delim.len()).position(|win| win == delim)?;
     let (headers, rest) = rest.split_at(idx);
     let body = &rest[4..];
+    let Ok(start_line) = str::from_utf8(start_line) else {
+        return None;
+    };
+    let Ok(headers) = str::from_utf8(headers) else {
+        return None;
+    };
     Some((start_line, headers, body))
 }
 
-async fn detect_header(sock: &TcpSocket) -> Vec<u8> {
-    let mut html: Vec<u8> = Vec::new();
+async fn detect_header(sock: &TcpSocket) -> TcpPacket {
     loop {
         match sock.packets.receive().await {
             Some(packet) => {
-                html.extend_from_slice(packet.as_bytes());
-                if split_request(&html).is_some() {
-                    break;
+                if split_request(packet.as_bytes()).is_some() {
+                    return packet;
+                } else {
+                    // Can only service small header files
+                    sock.write_and_close(BAD_REQUEST.as_bytes());
                 };
             }
             None => {
                 // Reset Detected
-                html.clear();
             }
         }
     }
-    html
+}
+
+fn check_start_line(start_line: &str) -> Result<Method, &'static str> {
+    let mut tokens = start_line.split(" ");
+    let Some(method) = tokens.next() else {
+        return Err(BAD_REQUEST);
+    };
+    let method = match method {
+        "GET" => Method::Get,
+        "PUT" => Method::Put,
+        _ => return Err(METHOD_NOT_ALLOWED),
+    };
+
+    let Some(url) = tokens.next() else {
+        return Err(BAD_REQUEST);
+    };
+    if url != "/" {
+        return Err(BAD_REQUEST);
+    }
+
+    Ok(method)
+}
+
+fn check_put_header(headers: &str) -> Result<usize, &'static str> {
+    let mut content_length: usize = 0;
+    let mut content_type: bool = false;
+    for line in headers.lines() {
+        let Some((key, val)) = line.split_once(":") else {
+            return Err(BAD_REQUEST);
+        };
+        match key {
+            "content-length" => {
+                let Ok(val) = val.trim().parse::<usize>() else {
+                    log_error!("Could not parse content-length");
+                    return Err(BAD_REQUEST);
+                };
+                content_length = val;
+            }
+            "Content-Length" => {
+                let Ok(val) = val.trim().parse::<usize>() else {
+                    return Err(BAD_REQUEST);
+                };
+                content_length = val;
+            }
+            "content-type" =>
+            {
+                #[allow(clippy::collapsible_match)]
+                if val.trim() == "text/x.gcode" {
+                    content_type = true;
+                }
+            }
+            "Content-Type" =>
+            {
+                #[allow(clippy::collapsible_match)]
+                if val.trim() == "text/x.gcode" {
+                    content_type = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if !content_type {
+        return Err(BAD_REQUEST);
+    }
+
+    if content_length == 0 {
+        return Err(BAD_REQUEST);
+    }
+
+    if content_length > 1_000_000 {
+        return Err(BAD_REQUEST);
+    }
+
+    Ok(content_length)
+}
+
+async fn handle_put(mut content_length: usize, body: &[u8], sock: &TcpSocket) {
+    // TODO
+    content_length = content_length.saturating_sub(body.len());
+    let mut i = 0;
+    let mut success = true;
+    /*
+    let Ok(flock) = FileLock::open(
+        c"rust.gcode",
+        FileMode::READ | FileMode::WRITE | FileMode::CREATE_ALWAYS,
+    ) else {
+        sock.write_and_close(SERVICE_UNAVAILABLE.as_bytes());
+        return;
+    };
+    */
+    while content_length != 0 {
+        i += 1;
+        if i % 10 == 0 {
+            log_info!("{i} CL: {}", content_length);
+        }
+        match sock
+            .packets
+            .receive()
+            .with_timeout(Duration::from_millis(1_000))
+            .await
+        {
+            Ok(Some(packet)) => {
+                let bytes = packet.as_bytes();
+                let to_write = core::cmp::min(content_length, bytes.len());
+                // let _ = flock.write(&bytes[..to_write]);
+                content_length = content_length.saturating_sub(to_write);
+            }
+            Ok(None) => {
+                log_info!("Connection Reset");
+                success = false;
+                // Reset by someone else
+                break;
+            }
+            Err(_) => {
+                log_info!("Timeout");
+                sock.write_and_close(REQUEST_TIMEOUT.as_bytes());
+                success = false;
+                break;
+            }
+        };
+    }
+    //let _ = flock.close();
+    log_info!("Finished: {success}");
+    if success {
+        sock.write_and_close(OK.as_bytes());
+    }
 }
