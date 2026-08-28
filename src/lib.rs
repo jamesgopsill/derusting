@@ -1,6 +1,9 @@
 #![no_std]
 
-use core::{cell::RefCell, ptr};
+use core::{
+    cell::RefCell,
+    ptr::{self},
+};
 
 use critical_section::Mutex;
 use embassy_time_queue_utils::Queue;
@@ -17,7 +20,7 @@ use crate::{
         time_driver::FreeRtosTimeDriver,
     },
     lwip::{init_tcp_service, init_udp_service},
-    tasks::{heartbeat, tcp_task},
+    tasks::{heartbeat, tcp_task, tcp_task_logic, write_file},
 };
 
 extern crate alloc;
@@ -56,7 +59,7 @@ pub unsafe extern "C" fn derusting_main() {
     log_info!("derusting_main()");
     match Task::try_from(&TASK) {
         Ok(_) => log_info!("Embassy has been created"),
-        // No task (i.e., null ptr) so create it (1024)
+        // No task (i.e., null ptr) so create it (7 max)
         Err(_) => match Task::new(c"Embassy", 512 * 4, 5, embassy) {
             Ok(t) => {
                 log_info!("Embassy task created.");
@@ -83,10 +86,10 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
 
     // A little FS test.
     log_info!("FS Test");
-    test_file();
-    test_file();
+    //test_file();
+    //test_file();
 
-    let _udp_sock = init_udp_service();
+    // let _udp_sock = init_udp_service();
     let tcp_sock = init_tcp_service();
 
     log_info!("Initialising Executor");
@@ -97,6 +100,15 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),
         }
+        match write_file() {
+            Ok(t) => spawner.spawn(t),
+            Err(e) => log_error!("Spawn Error: {e}"),
+        }
+        let tcp_fut = tcp_task_logic(tcp_sock);
+        log_info!(
+            "Size of TCP Future: {} bytes",
+            core::mem::size_of_val(&tcp_fut)
+        );
         match tcp_task(tcp_sock) {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),

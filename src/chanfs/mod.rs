@@ -7,12 +7,13 @@ use core::{
 mod bindings;
 
 use bindings::*;
-use embassy_sync::blocking_mutex::{Mutex, raw::ThreadModeRawMutex};
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
 
 use crate::{log_error, log_info};
 
-static FILE: Mutex<ThreadModeRawMutex, RefCell<File>> = Mutex::new(RefCell::new(File {
+static FILE: Mutex<CriticalSectionRawMutex, RefCell<File>> = Mutex::new(RefCell::new(File {
     is_open: false,
+    rng: 0,
     inner: MaybeUninit::uninit(),
 }));
 
@@ -30,9 +31,83 @@ bitflags::bitflags! {
 
 struct File {
     is_open: bool,
+    rng: u32,
     inner: MaybeUninit<Fil>,
 }
 
+pub fn fs_open(path: &CStr, mode: FileMode) -> Result<u32, FileResult> {
+    FILE.lock(|f| {
+        let mut file = f.borrow_mut();
+        if file.is_open {
+            return Err(FileResult::TooManyOpenFiles);
+        }
+        let res = unsafe { f_open(file.inner.as_mut_ptr(), path.as_ptr(), mode.bits()) };
+        if res != FileResult::Ok {
+            return Err(res);
+        }
+        file.is_open = true;
+        file.rng = 1; // The premise here is that you need to own this random value
+        Ok(1)
+    })
+}
+
+pub fn fs_write(buf: &[u8], lock: u32) -> Result<usize, FileResult> {
+    FILE.lock(|f| {
+        let mut file = f.borrow_mut();
+        if !file.is_open {
+            return Err(FileResult::NoFile);
+        }
+        if file.rng != lock {
+            return Err(FileResult::Denied);
+        }
+        let mut bytes_written: u32 = 0;
+        let res = unsafe {
+            f_write(
+                file.inner.as_mut_ptr(),
+                buf.as_ptr(),
+                buf.len() as c_uint,
+                &mut bytes_written,
+            )
+        };
+        if res != FileResult::Ok {
+            return Err(res);
+        }
+        Ok(bytes_written as usize)
+    })
+}
+
+pub fn fs_close(lock: u32) -> Result<(), FileResult> {
+    FILE.lock(|f| {
+        let mut file = f.borrow_mut();
+        if file.rng == lock {
+            if file.is_open {
+                let res = unsafe { f_close(file.inner.as_mut_ptr()) };
+                if res != FileResult::Ok {
+                    log_error!("File Closed Error: {}", res);
+                    return Err(res);
+                }
+            }
+        } else {
+            return Err(FileResult::Denied);
+        }
+        file.is_open = false;
+        file.rng = 0; // Ok so we cannot have a 0 in our rng gen
+        Ok(())
+    })
+}
+
+pub fn test_file() {
+    if let Ok(flock) = fs_open(
+        c"test.txt",
+        FileMode::READ | FileMode::WRITE | FileMode::CREATE_ALWAYS,
+    ) {
+        log_info!("Test File Opened");
+        let _ = fs_write(b"Hello World\n", flock);
+        let _ = fs_close(flock);
+        log_info!("Test File Closed");
+    }
+}
+/*
 pub struct FileLock();
 
 impl FileLock {
@@ -110,3 +185,4 @@ pub fn test_file() {
         };
     }
 }
+*/

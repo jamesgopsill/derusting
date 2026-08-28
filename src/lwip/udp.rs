@@ -2,18 +2,12 @@ use core::{cell::RefCell, ffi::c_void, sync::atomic::Ordering};
 
 use embassy_sync::{
     blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
-    channel::{Channel, TrySendError},
+    channel::Channel,
 };
 use portable_atomic::AtomicPtr;
 
-use crate::{
-    log_info,
-    lwip::{
-        bindings::*,
-        core::LwipCore,
-        ipaddr::IpAddr,
-        packet_buffer::{PacketBuffer, UdpPacket},
-    },
+use crate::lwip::{
+    bindings::*, core::LwipCore, ipaddr::IpAddr, packet_buffer::ZeroCopyPacketBuffer,
 };
 
 pub struct UdpProtocolControlBlock {
@@ -62,12 +56,14 @@ impl UdpProtocolControlBlock {
         };
     }
 
+    /*
     pub fn sendto(&self, pbuf: PacketBuffer, port: u16, _core: &LwipCore) -> Result<(), LwipError> {
         log_info!("udp_sendto");
         let addr: lwip_ipaddr = lwip_ipaddr { addr: u32::MAX };
         let err = unsafe { udp_sendto(self.as_mut_ptr(), pbuf.as_mut_ptr(), &addr, port) };
         err.into()
     }
+    */
 
     pub fn new(_core: &LwipCore) -> Result<UdpProtocolControlBlock, ()> {
         let pcb = unsafe { udp_new() };
@@ -81,7 +77,7 @@ impl UdpProtocolControlBlock {
 
 pub struct UdpDatagram {
     pub from: IpAddr,
-    pub packet: UdpPacket,
+    pub packet: ZeroCopyPacketBuffer,
 }
 
 pub struct UdpSocket {
@@ -111,7 +107,7 @@ unsafe extern "C" fn on_udp_recv(
     }
     let socket = unsafe { &*(arg as *const UdpSocket) };
 
-    let Ok(pb) = PacketBuffer::try_from(pbuf) else {
+    let Ok(pb) = ZeroCopyPacketBuffer::try_from(pbuf) else {
         return;
     };
 
@@ -121,8 +117,9 @@ unsafe extern "C" fn on_udp_recv(
 
     let msg = UdpDatagram {
         from: addr,
-        packet: pb.into_udp_packet(),
+        packet: pb,
     };
 
+    // NOTE. may have to handle missed sends to clean them up.
     let _ = socket.packets.try_send(msg);
 }

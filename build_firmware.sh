@@ -32,6 +32,16 @@ if ! grep -q "derusting_main();" ${BUDDY_MAIN}; then
   sed -i '/metrics_reconfigure();/a \      derusting_main();' ${BUDDY_MAIN}
 fi
 
+NEW_HEAP_SIZE=61440
+NEW_LINE="#define configTOTAL_HEAP_SIZE ((size_t)$NEW_HEAP_SIZE)"
+RTOS_CONFIG=buddy/include/stm32f4_hal/FreeRTOSConfig.h
+if grep -qF "$NEW_LINE" "$RTOS_CONFIG"; then
+  echo "Heap size is already $NEW_HEAP_SIZE. Skipping update to prevent rebuild."
+else
+  sed -i "s/^#define configTOTAL_HEAP_SIZE.*/#define configTOTAL_HEAP_SIZE ((size_t)$NEW_HEAP_SIZE)/" "${RTOS_CONFIG}"
+  grep "configTOTAL_HEAP_SIZE" "${RTOS_CONFIG}"
+fi
+
 cd ./buddy || {
   echo "Failed to find buddy dir"
 }

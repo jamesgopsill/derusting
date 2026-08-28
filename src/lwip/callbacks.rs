@@ -2,7 +2,7 @@ use core::ffi::c_void;
 
 use crate::{
     log_error, log_info,
-    lwip::{packet_buffer::PacketBuffer, tcp::TcpProtocolControlBlock},
+    lwip::{packet_buffer::ZeroCopyPacketBuffer, tcp::TcpProtocolControlBlock},
 };
 
 use super::bindings::*;
@@ -52,15 +52,14 @@ pub unsafe extern "C" fn on_tcp_recv(
     }
     let sock = unsafe { &*(arg as *const super::TcpSocket) };
 
-    let Ok(pbuf) = PacketBuffer::try_from(pbuf) else {
+    let Ok(pbuf) = ZeroCopyPacketBuffer::try_from(pbuf) else {
         log_info!("Remote host closed connection");
         sock.close();
         return LwipError::Ok;
     };
 
     let len = pbuf.total_len();
-    let packet = pbuf.into_tcp_packet();
-    if sock.packets.try_send(Some(packet)).is_ok() {
+    if sock.packets.try_send(Some(pbuf)).is_ok() {
         sock.recevd_in_lwip_thread(len);
         LwipError::Ok
     } else {

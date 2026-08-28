@@ -1,13 +1,13 @@
 use embassy_time::{Duration, Timer, WithTimeout as _};
 
 use crate::{
-    chanfs::{FileLock, FileMode},
+    chanfs::{FileMode, fs_close, fs_open, fs_write, test_file},
     http::{
-        BAD_REQUEST, INDEX_HTML, METHOD_NOT_ALLOWED, Method, OK, REQUEST_TIMEOUT,
-        SERVICE_UNAVAILABLE,
+        BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK,
+        REQUEST_TIMEOUT,
     },
     log_error, log_info,
-    lwip::{packet_buffer::TcpPacket, tcp_socket::TcpSocket},
+    lwip::tcp_socket::TcpSocket,
 };
 
 #[embassy_executor::task(pool_size = 1)]
@@ -22,13 +22,35 @@ pub async fn heartbeat() {
 }
 
 #[embassy_executor::task(pool_size = 1)]
+pub async fn write_file() {
+    Timer::after_secs(5).await;
+    test_file();
+}
+
+#[embassy_executor::task(pool_size = 1)]
 pub async fn tcp_task(sock: &'static TcpSocket) {
+    tcp_task_logic(sock).await
+}
+
+pub async fn tcp_task_logic(sock: &'static TcpSocket) {
     loop {
-        let first_packet = detect_header(sock).await;
-        let Some((start_line, headers, body)) = split_request(first_packet.as_bytes()) else {
+        let Some(pbuf) = sock.packets.receive().await else {
+            // Reset issued
+            continue;
+        };
+
+        let mut iter = pbuf.iter();
+
+        let Some(chunk) = iter.next() else {
             sock.write_and_close(BAD_REQUEST.as_bytes());
             continue;
         };
+
+        let Some((start_line, headers, body)) = split_request(chunk) else {
+            sock.write_and_close(BAD_REQUEST.as_bytes());
+            continue;
+        };
+
         let method = match check_start_line(start_line) {
             Ok(method) => method,
             Err(e) => {
@@ -36,6 +58,7 @@ pub async fn tcp_task(sock: &'static TcpSocket) {
                 continue;
             }
         };
+
         match method {
             Method::Get => {
                 log_info!("/ GET request");
@@ -43,14 +66,58 @@ pub async fn tcp_task(sock: &'static TcpSocket) {
             }
             Method::Put => {
                 log_info!("/ PUT request");
-                let content_length = match check_put_header(headers) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        sock.write_and_close(e.as_bytes());
-                        continue;
-                    }
+                let Ok(mut content_length) = check_put_header(headers) else {
+                    sock.write_and_close(BAD_REQUEST.as_bytes());
+                    continue;
                 };
-                handle_put(content_length, body, sock).await;
+
+                let Ok(flock) = fs_open(
+                    c"test.txt",
+                    FileMode::READ | FileMode::WRITE | FileMode::CREATE_ALWAYS,
+                ) else {
+                    sock.write_and_close(INTERNAL_SERVER_ERROR.as_bytes());
+                    continue;
+                };
+
+                // Write bytes to file from current chunk
+                let to_write = core::cmp::min(content_length, body.len());
+                let _ = fs_write(&body[..to_write], flock);
+                content_length = content_length.saturating_sub(to_write);
+
+                // Check the rest of the existing chain
+                let mut more_packets_needed = true;
+                for chunk in iter {
+                    log_info!("Chunk Length: {}", chunk.len());
+                    let to_write = core::cmp::min(content_length, chunk.len());
+                    let _ = fs_write(&chunk[..to_write], flock);
+                    content_length = content_length.saturating_sub(to_write);
+                    if content_length == 0 {
+                        more_packets_needed = false;
+                        break;
+                    }
+                }
+
+                // Do we need more chains? If so, wait to digest them.
+                if more_packets_needed {
+                    while content_length > 0 {
+                        let Some(pbuf) = sock.packets.receive().await else {
+                            sock.write_and_close(INTERNAL_SERVER_ERROR.as_bytes());
+                            continue;
+                        };
+                        for chunk in pbuf.iter() {
+                            log_info!("Chunk Length: {}", chunk.len());
+                            let to_write = core::cmp::min(content_length, chunk.len());
+                            let _ = fs_write(&chunk[..to_write], flock);
+                            content_length = content_length.saturating_sub(to_write);
+                            if content_length == 0 {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                let _ = fs_close(flock);
+                sock.write_and_close(OK.as_bytes());
             }
         }
     }
@@ -72,24 +139,6 @@ fn split_request(buf: &[u8]) -> Option<(&str, &str, &[u8])> {
         return None;
     };
     Some((start_line, headers, body))
-}
-
-async fn detect_header(sock: &TcpSocket) -> TcpPacket {
-    loop {
-        match sock.packets.receive().await {
-            Some(packet) => {
-                if split_request(packet.as_bytes()).is_some() {
-                    return packet;
-                } else {
-                    // Can only service small header files
-                    sock.write_and_close(BAD_REQUEST.as_bytes());
-                };
-            }
-            None => {
-                // Reset Detected
-            }
-        }
-    }
 }
 
 fn check_start_line(start_line: &str) -> Result<Method, &'static str> {
@@ -167,35 +216,26 @@ fn check_put_header(headers: &str) -> Result<usize, &'static str> {
     Ok(content_length)
 }
 
-async fn handle_put(mut content_length: usize, body: &[u8], sock: &TcpSocket) {
-    // TODO
-    content_length = content_length.saturating_sub(body.len());
-    let mut i = 0;
+/*
+
+async fn handle_put(mut content_length: usize, flock: u32, sock: &TcpSocket) {
     let mut success = true;
-    /*
-    let Ok(flock) = FileLock::open(
-        c"rust.gcode",
-        FileMode::READ | FileMode::WRITE | FileMode::CREATE_ALWAYS,
-    ) else {
-        sock.write_and_close(SERVICE_UNAVAILABLE.as_bytes());
-        return;
-    };
-    */
+    let mut i = 0;
     while content_length != 0 {
         i += 1;
-        if i % 10 == 0 {
+        if i % 20 == 0 {
             log_info!("{i} CL: {}", content_length);
         }
         match sock
             .packets
             .receive()
-            .with_timeout(Duration::from_millis(1_000))
+            .with_timeout(Duration::from_secs(2))
             .await
         {
             Ok(Some(packet)) => {
                 let bytes = packet.as_bytes();
                 let to_write = core::cmp::min(content_length, bytes.len());
-                // let _ = flock.write(&bytes[..to_write]);
+                let _ = fs_write(&bytes[..to_write], flock);
                 content_length = content_length.saturating_sub(to_write);
             }
             Ok(None) => {
@@ -205,16 +245,16 @@ async fn handle_put(mut content_length: usize, body: &[u8], sock: &TcpSocket) {
                 break;
             }
             Err(_) => {
-                log_info!("Timeout");
+                log_info!("Timeout with {content_length} remaining");
                 sock.write_and_close(REQUEST_TIMEOUT.as_bytes());
                 success = false;
                 break;
             }
         };
     }
-    //let _ = flock.close();
     log_info!("Finished: {success}");
     if success {
         sock.write_and_close(OK.as_bytes());
     }
 }
+*/

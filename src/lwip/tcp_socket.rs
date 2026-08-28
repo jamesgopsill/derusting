@@ -5,17 +5,18 @@ use embassy_sync::{
     channel::Channel,
 };
 
+use crate::lwip::packet_buffer::ZeroCopyPacketBuffer;
 use crate::{
     log_error, log_info,
-    lwip::{self, core::LwipCore, packet_buffer::TcpPacket, tcp::TcpProtocolControlBlock},
+    lwip::{self, core::LwipCore, tcp::TcpProtocolControlBlock},
 };
 
 pub struct TcpSocket {
-    pub packets: Channel<CriticalSectionRawMutex, Option<TcpPacket>, 2>,
+    pub packets: Channel<CriticalSectionRawMutex, Option<ZeroCopyPacketBuffer>, 2>,
     pub pcb: Mutex<CriticalSectionRawMutex, RefCell<Option<TcpProtocolControlBlock>>>,
 }
 
-impl Default for TcpSocket {
+impl<'a> Default for TcpSocket {
     fn default() -> Self {
         Self {
             packets: Channel::new(),
