@@ -1,13 +1,8 @@
-use core::{default, ffi::c_void, ptr, sync::atomic::Ordering};
+use core::{ffi::c_void, sync::atomic::Ordering};
 
-use alloc::{boxed::Box, vec::Vec};
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex,
-    channel::{Channel, TrySendError},
-};
 use portable_atomic::AtomicPtr;
 
-use crate::lwip::{self, bindings::*, core::LwipCore};
+use crate::lwip::{bindings::*, core::LwipCore};
 
 #[derive(Debug, Clone)]
 pub struct TcpProtocolControlBlock {
@@ -55,15 +50,23 @@ impl TcpProtocolControlBlock {
         unsafe { tcp_recv(self.as_mut_ptr(), callback) };
     }
 
+    pub fn recv_with_core(&self, callback: Option<TcpRecvFn>, _core: &LwipCore) {
+        self.recv(callback);
+    }
+
     pub fn err(&self, callback: Option<LwipErrFn>) {
         unsafe { tcp_err(self.as_mut_ptr(), callback) };
     }
 
-    pub fn close_with_core(self, _core: &LwipCore) -> Result<(), LwipError> {
+    pub fn err_with_core(&self, callback: Option<LwipErrFn>, _core: &LwipCore) {
+        self.err(callback);
+    }
+
+    pub fn close_with_core(&self, _core: &LwipCore) -> Result<(), LwipError> {
         self.close()
     }
 
-    pub fn close(self) -> Result<(), LwipError> {
+    pub fn close(&self) -> Result<(), LwipError> {
         let err = unsafe { tcp_close(self.as_mut_ptr()) };
         err.into()
     }
@@ -72,13 +75,11 @@ impl TcpProtocolControlBlock {
         unsafe { tcp_recved(self.as_mut_ptr(), len) };
     }
 
-    // TODO: add error parsing
-    pub fn write_with_core(&self, slice: &[u8], _core: &LwipCore) {
-        self.write(slice);
+    pub fn write_with_core(&self, slice: &[u8], _core: &LwipCore) -> Result<(), LwipError> {
+        self.write(slice)
     }
 
     pub fn write(&self, slice: &[u8]) -> Result<(), LwipError> {
-        // TODO: check the u16 conversion (suppose it will just clip the data)
         let err = unsafe {
             tcp_write(
                 self.as_mut_ptr(),
@@ -95,21 +96,47 @@ impl TcpProtocolControlBlock {
         err.into()
     }
 
+    pub fn output_with_core(&self, _core: &LwipCore) -> Result<(), LwipError> {
+        self.output()
+    }
+
     pub fn bind(&self, port: u16) -> Result<(), LwipError> {
         let err = unsafe { tcp_bind(self.as_mut_ptr(), &ip_addr_any, port) };
         err.into()
     }
 
-    pub fn accept(&self, callback: Option<TcpAcceptFn>, core: &LwipCore) {
+    pub fn bind_with_core(&self, port: u16, _core: &LwipCore) -> Result<(), LwipError> {
+        self.bind(port)
+    }
+
+    pub fn accept(&self, callback: Option<TcpAcceptFn>) {
         unsafe { tcp_accept(self.as_mut_ptr(), callback) };
     }
 
-    pub fn listen_with_backlog(
-        &self,
-        backlog: u8,
-        core: &LwipCore,
-    ) -> Result<TcpProtocolControlBlock, ()> {
+    pub fn accept_with_core(&self, callback: Option<TcpAcceptFn>, _core: &LwipCore) {
+        self.accept(callback);
+    }
+
+    pub fn listen_with_backlog(&self, backlog: u8) -> Result<TcpProtocolControlBlock, ()> {
         let pcb = unsafe { tcp_listen_with_backlog(self.as_mut_ptr(), backlog) };
         TcpProtocolControlBlock::try_from(pcb)
+    }
+
+    pub fn listen_with_backlog_with_core(
+        &self,
+        backlog: u8,
+        _core: &LwipCore,
+    ) -> Result<TcpProtocolControlBlock, ()> {
+        self.listen_with_backlog(backlog)
+    }
+
+    pub fn sent(&self, callback: Option<TcpSentFn>) {
+        unsafe {
+            tcp_sent(self.as_mut_ptr(), callback);
+        }
+    }
+
+    pub fn sent_with_core(&self, callback: Option<TcpSentFn>, _core: &LwipCore) {
+        self.sent(callback);
     }
 }

@@ -7,10 +7,12 @@ use crate::log_error;
 unsafe extern "C" {
     pub fn f_open(fp: *mut Fil, path: *const c_char, mode: u8) -> FileResult;
     pub fn f_close(fp: *mut Fil) -> FileResult;
+    #[allow(unused)]
     pub fn f_read(fp: *mut Fil, buff: *mut u8, btr: c_uint, br: *mut c_uint) -> FileResult;
     pub fn f_write(fp: *mut Fil, buff: *const u8, btw: c_uint, bw: *mut c_uint) -> FileResult;
     #[allow(unused)]
     pub fn f_lseek(fp: *mut Fil, ofs: c_uint) -> FileResult;
+    #[allow(unused)]
     pub fn f_sync(fp: *mut Fil) -> FileResult;
 }
 

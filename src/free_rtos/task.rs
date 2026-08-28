@@ -12,7 +12,12 @@ pub struct Task {
 impl Task {
     /// Create a new Task that is given a name, stack_depth and the function that it
     /// should run.
-    pub fn new(name: &CStr, stack_depth: u16, fcn: TaskFn) -> Result<Self, FreeRtosError> {
+    pub fn new(
+        name: &CStr,
+        stack_depth: u16,
+        priority: u32,
+        fcn: TaskFn,
+    ) -> Result<Self, FreeRtosError> {
         let ptr: *mut RtosTask = ptr::null_mut();
         let res = unsafe {
             xTaskCreate(
@@ -20,7 +25,7 @@ impl Task {
                 name.as_ptr(),
                 stack_depth,
                 ptr::null_mut(),
-                2, // Low priority
+                priority,
                 ptr,
             )
         };

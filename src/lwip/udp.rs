@@ -1,6 +1,5 @@
-use core::{ffi::c_void, ptr, sync::atomic::Ordering};
+use core::{ffi::c_void, sync::atomic::Ordering};
 
-use alloc::vec::Vec;
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Channel, TrySendError},
@@ -9,7 +8,12 @@ use portable_atomic::AtomicPtr;
 
 use crate::{
     log_info,
-    lwip::{bindings::*, core::LwipCore, ipaddr::IpAddr, packet_buffer::PacketBuffer},
+    lwip::{
+        bindings::*,
+        core::LwipCore,
+        ipaddr::IpAddr,
+        packet_buffer::{PacketBuffer, UdpPacket},
+    },
 };
 
 pub struct UdpProtocolControlBlock {
@@ -43,12 +47,12 @@ impl UdpProtocolControlBlock {
         self.inner
     }
 
-    pub fn bind(&self, port: u16, core: &LwipCore) -> Result<(), LwipError> {
+    pub fn bind(&self, port: u16, _core: &LwipCore) -> Result<(), LwipError> {
         let err = unsafe { udp_bind(self.as_mut_ptr(), &ip_addr_any, port) };
         err.into()
     }
 
-    pub fn recv(&self, channel: &'static UdpChannel, core: &LwipCore) {
+    pub fn recv(&self, channel: &'static UdpChannel, _core: &LwipCore) {
         unsafe {
             udp_recv(
                 self.as_mut_ptr(),
@@ -58,26 +62,26 @@ impl UdpProtocolControlBlock {
         };
     }
 
-    pub fn sendto(&self, pbuf: PacketBuffer, port: u16, core: &LwipCore) -> Result<(), LwipError> {
+    pub fn sendto(&self, pbuf: PacketBuffer, port: u16, _core: &LwipCore) -> Result<(), LwipError> {
         log_info!("udp_sendto");
         let addr: lwip_ipaddr = lwip_ipaddr { addr: u32::MAX };
         let err = unsafe { udp_sendto(self.as_mut_ptr(), pbuf.as_mut_ptr(), &addr, port) };
         err.into()
     }
 
-    pub fn new(core: &LwipCore) -> Result<UdpProtocolControlBlock, ()> {
+    pub fn new(_core: &LwipCore) -> Result<UdpProtocolControlBlock, ()> {
         let pcb = unsafe { udp_new() };
         UdpProtocolControlBlock::try_from(pcb)
     }
 
-    pub fn remove(self, core: &LwipCore) {
+    pub fn remove(self, _core: &LwipCore) {
         unsafe { udp_remove(self.as_mut_ptr()) };
     }
 }
 
 pub struct UdpDatagram {
     pub from: IpAddr,
-    pub data: Vec<u8>,
+    pub packet: UdpPacket,
 }
 
 pub struct UdpChannel {
@@ -125,7 +129,7 @@ unsafe extern "C" fn on_udp_recv(
 
     let msg = UdpDatagram {
         from: addr,
-        data: pb.as_vec(),
+        packet: pb.into_udp_packet(),
     };
 
     // Do not hold up the callback. We may drop.

@@ -91,6 +91,8 @@ pub type TcpRecvFn = unsafe extern "C" fn(
     pbuf: *mut lwip_pbuf,
     err: LwipError,
 ) -> LwipError;
+pub type TcpSentFn =
+    unsafe extern "C" fn(arg: *mut c_void, _pcb: *mut lwip_pcb, len: u16) -> LwipError;
 pub type UdpRecvFn = unsafe extern "C" fn(
     arg: *mut c_void,
     pcb: *mut lwip_pcb,
@@ -134,6 +136,7 @@ unsafe extern "C" {
     pub(super) fn tcp_accept(pcb: *mut lwip_pcb, accept: Option<TcpAcceptFn>);
     pub(super) fn tcp_recv(pcb: *mut lwip_pcb, recv: Option<TcpRecvFn>);
     pub(super) fn tcp_err(pcb: *mut lwip_pcb, err: Option<LwipErrFn>);
+    pub(super) fn tcp_sent(arg: *mut lwip_pcb, callback: Option<TcpSentFn>);
     // Data
     pub(super) fn tcp_write(
         pcb: *mut lwip_pcb,

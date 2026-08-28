@@ -1,16 +1,13 @@
 #![no_std]
 
-use core::{cell::RefCell, ffi::c_void, ptr, sync::atomic::Ordering};
+use core::{cell::RefCell, ptr};
 
-use alloc::boxed::Box;
 use critical_section::Mutex;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time_queue_utils::Queue;
 use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
 use static_cell::StaticCell;
 
 use crate::{
-    chanfs::test_file,
     free_rtos::{
         alloc::FreeRtosAllocator,
         bindings::{RtosTask, RtosTaskParams, vTaskDelay, xTaskGetCurrentTaskHandle},
@@ -18,14 +15,8 @@ use crate::{
         task::Task,
         time_driver::FreeRtosTimeDriver,
     },
-    lwip::{
-        bindings::lwip_pcb,
-        callbacks::on_tcp_accept,
-        handler::Handler,
-        tcp::TcpProtocolControlBlock,
-        udp::{UdpChannel, UdpProtocolControlBlock},
-    },
-    tasks::{heartbeat, tcp_pool},
+    lwip::init_tcp_service,
+    tasks::{heartbeat, tcp_task},
 };
 
 extern crate alloc;
@@ -56,16 +47,6 @@ static TASK: AtomicPtr<RtosTask> = AtomicPtr::new(ptr::null_mut());
 /// Static store for our Embassy Executor.
 static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
 
-// Static handles for our UDP Service.
-static UDP_SERVICE: AtomicPtr<lwip_pcb> = AtomicPtr::new(ptr::null_mut());
-static UDP_CHANNEL: StaticCell<UdpChannel> = StaticCell::new();
-
-// Static handles for our TCP Service.
-pub const MAX_HANDLERS: usize = 3;
-pub type TcpChannels = Channel<CriticalSectionRawMutex, Box<Handler>, MAX_HANDLERS>;
-static TCP_SERVICE: AtomicPtr<lwip_pcb> = AtomicPtr::new(ptr::null_mut());
-static TCP_CHANNELS: StaticCell<TcpChannels> = StaticCell::new();
-
 /// # Safety
 /// We will ensure that we call this function in an
 /// appropriate place in the Buddy firmware.
@@ -75,7 +56,7 @@ pub unsafe extern "C" fn derusting_main() {
     match Task::try_from(&TASK) {
         Ok(_) => log_info!("Embassy has been created"),
         // No task (i.e., null ptr) so create it (2056)
-        Err(_) => match Task::new(c"Embassy", 2056, embassy) {
+        Err(_) => match Task::new(c"Embassy", 2056, 5, embassy) {
             Ok(t) => {
                 log_info!("Embassy task created.");
                 TASK.store(t.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
@@ -99,60 +80,10 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
     }
 
     // A little FS test.
-    test_file();
+    // test_file();
 
-    // Setting up the UDP service
-    let mut udp_channel: Option<&'static UdpChannel> = None;
-    let tcp_channels = TCP_CHANNELS.init(Channel::new());
-    lwip::core::with_lwip_core(|core| {
-        // UDP Service
-        if let Ok(service) = UdpProtocolControlBlock::try_from(&UDP_SERVICE) {
-            log_info!("Removing existing UDP service");
-            service.remove(&core);
-        }
-        if let Ok(pcb) = UdpProtocolControlBlock::new(&core) {
-            match pcb.bind(9000, &core) {
-                Err(_) => {
-                    log_error!("Failed to bind on 9000");
-                    pcb.remove(&core);
-                }
-                Ok(_) => {
-                    let channel = UDP_CHANNEL.init(UdpChannel::default());
-                    pcb.recv(channel, &core);
-                    log_info!("UDP Service Available on 9000...");
-                    UDP_SERVICE.store(pcb.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
-                    udp_channel = Some(channel);
-                }
-            }
-        } else {
-            log_error!("UDP block not created")
-        }
-
-        // TCP Service
-        if let Ok(tcp) = TcpProtocolControlBlock::try_from(&TCP_SERVICE) {
-            log_info!("Removing existing TCP service");
-            let _ = tcp.close_with_core(&core);
-        }
-
-        if let Ok(tcp) = TcpProtocolControlBlock::new(&core) {
-            let err = tcp.bind(8080);
-            match err {
-                Ok(_) => {
-                    if let Ok(tcp) = tcp.listen_with_backlog(2, &core) {
-                        tcp.arg_with_core(tcp_channels as *mut _ as *mut c_void, &core);
-                        tcp.accept(Some(on_tcp_accept), &core);
-                        TCP_SERVICE.store(tcp.as_mut_ptr(), Ordering::SeqCst);
-                        log_info!("TCP UP on 8080...");
-                    }
-                }
-                Err(_) => {
-                    let _ = tcp.close_with_core(&core);
-                }
-            }
-        } else {
-            log_error!("TCP block not created");
-        }
-    });
+    // let _udp_channel = init_udp_service();
+    let tcp_sock = init_tcp_service();
 
     log_info!("Initialising Executor");
     let executor = EXECUTOR.init(FreeRtosTaskExecutor::new(current_task as _));
@@ -162,7 +93,7 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),
         }
-        match tcp_pool(spawner, tcp_channels) {
+        match tcp_task(tcp_sock) {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),
         }

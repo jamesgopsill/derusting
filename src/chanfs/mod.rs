@@ -60,11 +60,8 @@ impl FileLock {
             }
             Ok(file.inner.as_mut_ptr())
         })?;
-        log_info!("Here (1)");
         let mut bytes_written: c_uint = 0;
-        log_info!("Here (2)");
         let res = unsafe { f_write(fp, buf.as_ptr(), buf.len() as c_uint, &mut bytes_written) };
-        log_info!("Here (3)");
         if res != FileResult::Ok {
             return Err(res);
         }

@@ -1,5 +1,3 @@
-use alloc::vec::Vec;
-
 use super::bindings::*;
 
 pub struct PacketBuffer {
@@ -34,25 +32,7 @@ impl PacketBuffer {
         unsafe { (*self.inner).tot_len }
     }
 
-    pub fn as_vec(&self) -> Vec<u8> {
-        let mut data: Vec<u8> = Vec::with_capacity(self.total_len() as usize);
-        unsafe {
-            let copied = pbuf_copy_partial(
-                self.inner as *const lwip_pbuf,
-                data.as_mut_ptr(),
-                data.capacity() as u16,
-                0,
-            );
-            data.set_len(copied as usize);
-        };
-        data
-    }
-
-    pub fn into_vec(self) -> Vec<u8> {
-        self.as_vec()
-    }
-
-    pub fn as_array(&self) -> (usize, [u8; 1024]) {
+    pub fn into_tcp_packet(self) -> TcpPacket {
         let mut data = [0u8; 1024];
         let copied = unsafe {
             pbuf_copy_partial(
@@ -62,7 +42,26 @@ impl PacketBuffer {
                 0,
             )
         };
-        (copied as usize, data)
+        TcpPacket {
+            arr: data,
+            len: copied as usize,
+        }
+    }
+
+    pub fn into_udp_packet(self) -> UdpPacket {
+        let mut data = [0u8; 1024];
+        let copied = unsafe {
+            pbuf_copy_partial(
+                self.inner as *const lwip_pbuf,
+                data.as_mut_ptr(),
+                data.len() as u16,
+                0,
+            )
+        };
+        UdpPacket {
+            arr: data,
+            len: copied as usize,
+        }
     }
 
     pub fn write(&self, data: &[u8]) {
@@ -76,5 +75,27 @@ impl PacketBuffer {
 impl Drop for PacketBuffer {
     fn drop(&mut self) {
         unsafe { pbuf_free(self.inner) };
+    }
+}
+
+pub struct TcpPacket {
+    arr: [u8; 1024],
+    len: usize,
+}
+
+impl TcpPacket {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.arr[..self.len]
+    }
+}
+
+pub struct UdpPacket {
+    arr: [u8; 1024],
+    len: usize,
+}
+
+impl UdpPacket {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.arr[..self.len]
     }
 }

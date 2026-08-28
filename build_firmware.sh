@@ -36,7 +36,13 @@ cd ./buddy || {
   echo "Failed to find buddy dir"
 }
 
-python utils/build.py --preset mini --build-type release --bootloader no
+#python utils/build.py --preset mini --build-type release --bootloader no
+python utils/build.py --preset mini --build-type release --bootloader no \
+  -DWUI:STRING=YES \
+  -DBUDDY_ENABLE_WUI:BOOL=YES \
+  -DCONNECT:STRING=NO \
+  -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
+  -DHAS_NFC:BOOL=OFF
 
 cd ..
 
