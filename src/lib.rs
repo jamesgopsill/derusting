@@ -19,7 +19,7 @@ use crate::{
         time_driver::FreeRtosTimeDriver,
     },
     lwip::{init_tcp_service, init_udp_service},
-    marlin::home,
+    marlin::{home, is_ready, set_offline},
     tasks::{heartbeat, tcp_task, tcp_task_logic, write_file},
 };
 
@@ -85,7 +85,10 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
         log_error!("We should only be called within a FreeRTOS task.");
     }
 
-    home();
+    // home();
+
+    log_info!("Is Ready: {}", is_ready());
+    set_offline();
 
     let _udp_sock = init_udp_service();
     let tcp_sock = init_tcp_service();

@@ -7,6 +7,8 @@ use crate::log_info;
 unsafe extern "C" {
     fn derusting_gcode_cmd(cmd: *const c_char) -> bool;
     fn derusting_is_idle() -> bool;
+    static derusting_ready_flag: core::sync::atomic::AtomicBool;
+    fn derusting_update_ui();
 }
 
 pub fn is_idle() -> bool {
@@ -27,4 +29,13 @@ pub fn home() {
         log_info!("Home called");
         unsafe { derusting_gcode_cmd(c"G28".as_ptr()) };
     }
+}
+
+pub fn is_ready() -> bool {
+    unsafe { derusting_ready_flag.load(core::sync::atomic::Ordering::SeqCst) }
+}
+
+pub fn set_offline() {
+    unsafe { derusting_ready_flag.store(false, core::sync::atomic::Ordering::SeqCst) };
+    unsafe { derusting_update_ui() };
 }
