@@ -114,7 +114,6 @@ pub async fn tcp_task_logic(sock: &'static TcpSocket) {
 
                 f.close();
                 sock.write_and_close(OK.as_bytes());
-                Timer::after_micros(500).await;
                 dry_print();
             }
         }
@@ -213,46 +212,3 @@ fn check_put_header(headers: &str) -> Result<usize, &'static str> {
 
     Ok(content_length)
 }
-
-/*
-
-async fn handle_put(mut content_length: usize, flock: u32, sock: &TcpSocket) {
-    let mut success = true;
-    let mut i = 0;
-    while content_length != 0 {
-        i += 1;
-        if i % 20 == 0 {
-            log_info!("{i} CL: {}", content_length);
-        }
-        match sock
-            .packets
-            .receive()
-            .with_timeout(Duration::from_secs(2))
-            .await
-        {
-            Ok(Some(packet)) => {
-                let bytes = packet.as_bytes();
-                let to_write = core::cmp::min(content_length, bytes.len());
-                let _ = fs_write(&bytes[..to_write], flock);
-                content_length = content_length.saturating_sub(to_write);
-            }
-            Ok(None) => {
-                log_info!("Connection Reset");
-                success = false;
-                // Reset by someone else
-                break;
-            }
-            Err(_) => {
-                log_info!("Timeout with {content_length} remaining");
-                sock.write_and_close(REQUEST_TIMEOUT.as_bytes());
-                success = false;
-                break;
-            }
-        };
-    }
-    log_info!("Finished: {success}");
-    if success {
-        sock.write_and_close(OK.as_bytes());
-    }
-}
-*/

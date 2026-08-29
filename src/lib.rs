@@ -61,7 +61,7 @@ pub unsafe extern "C" fn derusting_main() {
     match Task::try_from(&TASK) {
         Ok(_) => log_info!("Embassy has been created"),
         // No task (i.e., null ptr) so create it (7 max)
-        Err(_) => match Task::new(c"Embassy", 512 * 6, 5, embassy) {
+        Err(_) => match Task::new(c"Embassy", 512 * 2, 1, embassy) {
             Ok(t) => {
                 log_info!("Embassy task created.");
                 TASK.store(t.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
