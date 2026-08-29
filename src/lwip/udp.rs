@@ -75,6 +75,7 @@ impl UdpProtocolControlBlock {
     }
 }
 
+#[allow(unused)]
 pub struct UdpDatagram {
     pub from: IpAddr,
     pub packet: ZeroCopyPacketBuffer,

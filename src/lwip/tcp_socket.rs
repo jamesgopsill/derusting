@@ -5,15 +5,18 @@ use embassy_sync::{
     channel::Channel,
 };
 
-use crate::lwip::packet_buffer::ZeroCopyPacketBuffer;
+use crate::lwip::{
+    packet_buffer::ZeroCopyPacketBuffer,
+    tcp::{InThreadTcpProtocolControlBlock, OutThreadTcpProtocolControlBlock},
+};
 use crate::{
-    log_error, log_info,
-    lwip::{self, core::LwipCore, tcp::TcpProtocolControlBlock},
+    log_error,
+    lwip::{self},
 };
 
 pub struct TcpSocket {
     pub packets: Channel<CriticalSectionRawMutex, Option<ZeroCopyPacketBuffer>, 10>,
-    pub pcb: Mutex<CriticalSectionRawMutex, RefCell<Option<TcpProtocolControlBlock>>>,
+    pub pcb: Mutex<CriticalSectionRawMutex, RefCell<Option<OutThreadTcpProtocolControlBlock>>>,
 }
 
 impl Default for TcpSocket {
@@ -26,49 +29,40 @@ impl Default for TcpSocket {
 }
 
 impl TcpSocket {
-    pub fn on_accept_add_pcb(&self, pcb: TcpProtocolControlBlock) {
+    // Thread side function
+    pub fn on_accept_add_pcb(&self, pcb: InThreadTcpProtocolControlBlock) {
+        let pcb = OutThreadTcpProtocolControlBlock::from(pcb);
         self.pcb.lock(|rc| *rc.borrow_mut() = Some(pcb))
     }
 
-    pub fn close(&self) {
-        log_info!("Handler: closing TCP");
-        self.pcb.lock(|rc| {
-            if let Some(pcb) = rc.take() {
-                pcb.recv(None);
-                pcb.err(None);
-                pcb.sent(None);
-                pcb.accept(None);
-                let _ = pcb.output();
-                if pcb.close().is_err() {
-                    log_error!("Error Closing");
-                    // TODO: Abort
+    // Out of thread function
+    pub fn reset(&self) {
+        lwip::core::with_lwip_core(|core| {
+            self.pcb.lock(|rc| {
+                if let Some(pcb) = rc.take() {
+                    pcb.recv(None, &core);
+                    pcb.err(None, &core);
+                    pcb.sent(None, &core);
+                    pcb.accept(None, &core);
+                    let _ = pcb.output(&core);
+                    if pcb.close(&core).is_err() {
+                        log_error!("Error Closing");
+                    }
                 }
-            }
+            });
         });
         self.packets.clear();
-        let _ = self.packets.try_send(None);
     }
 
-    pub fn close_with_core(&self, _core: &LwipCore) {
-        self.close();
-    }
-
-    pub fn write_and_close(&self, bytes: &[u8]) {
+    // Out of thread function
+    pub fn send_response(&self, bytes: &[u8]) {
         lwip::core::with_lwip_core(|core| {
             self.pcb.lock(|rc| {
                 if let Some(pcb) = &*rc.borrow() {
-                    let _ = pcb.write_with_core(bytes, &core);
+                    let _ = pcb.write(bytes, &core);
                 }
             });
-            self.close_with_core(&core);
         });
-    }
-
-    pub fn recevd_in_lwip_thread(&self, len: u16) {
-        self.pcb.lock(|rc| {
-            if let Some(pcb) = &*rc.borrow() {
-                pcb.recved(len);
-            }
-        });
+        self.reset();
     }
 }

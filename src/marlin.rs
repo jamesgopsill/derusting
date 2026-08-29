@@ -24,6 +24,7 @@ pub fn dry_print() {
     }
 }
 
+#[allow(unused)]
 pub fn home() {
     if is_idle() {
         log_info!("Home called");

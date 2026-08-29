@@ -1,7 +1,7 @@
 use embassy_time::Timer;
 
 use crate::{
-    fs::{File, test_file},
+    fs::{File, FileMode, test_file},
     http::{BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK},
     log_error, log_info,
     lwip::tcp_socket::TcpSocket,
@@ -34,26 +34,27 @@ pub async fn tcp_task(sock: &'static TcpSocket) {
 pub async fn tcp_task_logic(sock: &'static TcpSocket) {
     loop {
         let Some(pbuf) = sock.packets.receive().await else {
-            // Reset issued
+            log_error!("Socket Reset");
+            sock.reset();
             continue;
         };
 
         let mut iter = pbuf.iter();
 
         let Some(chunk) = iter.next() else {
-            sock.write_and_close(BAD_REQUEST.as_bytes());
+            sock.send_response(BAD_REQUEST.as_bytes());
             continue;
         };
 
         let Some((start_line, headers, body)) = split_request(chunk) else {
-            sock.write_and_close(BAD_REQUEST.as_bytes());
+            sock.send_response(BAD_REQUEST.as_bytes());
             continue;
         };
 
         let method = match check_start_line(start_line) {
             Ok(method) => method,
             Err(e) => {
-                sock.write_and_close(e.as_bytes());
+                sock.send_response(e.as_bytes());
                 continue;
             }
         };
@@ -61,17 +62,17 @@ pub async fn tcp_task_logic(sock: &'static TcpSocket) {
         match method {
             Method::Get => {
                 log_info!("/ GET request");
-                sock.write_and_close(INDEX_HTML.as_bytes());
+                sock.send_response(INDEX_HTML.as_bytes());
             }
             Method::Put => {
                 log_info!("/ PUT request");
                 let Ok(mut content_length) = check_put_header(headers) else {
-                    sock.write_and_close(BAD_REQUEST.as_bytes());
+                    sock.send_response(BAD_REQUEST.as_bytes());
                     continue;
                 };
 
-                let Ok(f) = File::open(c"/usb/rust.gcode", c"wb") else {
-                    sock.write_and_close(INTERNAL_SERVER_ERROR.as_bytes());
+                let Ok(f) = File::open(c"/usb/rust.gcode", FileMode::Write) else {
+                    sock.send_response(INTERNAL_SERVER_ERROR.as_bytes());
                     continue;
                 };
 
@@ -97,7 +98,9 @@ pub async fn tcp_task_logic(sock: &'static TcpSocket) {
                 if more_packets_needed {
                     while content_length > 0 {
                         let Some(pbuf) = sock.packets.receive().await else {
-                            sock.write_and_close(INTERNAL_SERVER_ERROR.as_bytes());
+                            log_error!("Socket Reset");
+                            sock.reset();
+                            // sock.send_response(INTERNAL_SERVER_ERROR.as_bytes());
                             continue;
                         };
                         for chunk in pbuf.iter() {
@@ -113,7 +116,7 @@ pub async fn tcp_task_logic(sock: &'static TcpSocket) {
                 }
 
                 f.close();
-                sock.write_and_close(OK.as_bytes());
+                sock.send_response(OK.as_bytes());
                 dry_print();
             }
         }

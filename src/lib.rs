@@ -19,7 +19,7 @@ use crate::{
         time_driver::FreeRtosTimeDriver,
     },
     lwip::{init_tcp_service, init_udp_service},
-    marlin::{home, is_ready, set_offline},
+    marlin::{is_ready, set_offline},
     tasks::{heartbeat, tcp_task, tcp_task_logic, write_file},
 };
 

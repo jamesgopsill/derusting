@@ -1,9 +1,11 @@
 use super::bindings::*;
 
+#[allow(unused)]
 pub struct IpAddr {
     inner: *const lwip_ipaddr,
 }
 
+#[allow(unused)]
 impl IpAddr {
     pub fn addr(&self) -> u32 {
         unsafe { (*self.inner).addr }

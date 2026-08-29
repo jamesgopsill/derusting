@@ -158,7 +158,6 @@ dependencies = [
  "embassy-time",
  "embassy-time-driver",
  "embassy-time-queue-utils",
- "embedded-io",
  "portable-atomic",
  "static_cell",
 ]

@@ -5,6 +5,7 @@ pub const INTERNAL_SERVER_ERROR: &str =
 pub const OK: &str = "HTTP/1.1 200 OK\r\nContent-length:4\r\nConnection: close\r\n\r\npong";
 pub const BAD_REQUEST: &str =
     "HTTP/1.1 400 Bad Request\r\nContent-length:0\r\nConnection: close\r\n\r\n";
+#[allow(unused)]
 pub const REQUEST_TIMEOUT: &str =
     "HTTP/1.1 408 Request Timeout\r\nContent-length:0\r\nConnection: close\r\n\r\n";
 pub const METHOD_NOT_ALLOWED: &str =

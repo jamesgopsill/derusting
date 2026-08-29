@@ -2,7 +2,7 @@ use core::ffi::c_void;
 
 use crate::{
     log_error, log_info,
-    lwip::{packet_buffer::ZeroCopyPacketBuffer, tcp::TcpProtocolControlBlock},
+    lwip::{packet_buffer::ZeroCopyPacketBuffer, tcp::InThreadTcpProtocolControlBlock},
 };
 
 use super::bindings::*;
@@ -20,7 +20,7 @@ pub unsafe extern "C" fn on_tcp_accept(
         return LwipError::Ok;
     }
 
-    let Ok(pcb) = TcpProtocolControlBlock::try_from(pcb) else {
+    let Ok(pcb) = InThreadTcpProtocolControlBlock::try_from(pcb) else {
         log_error!("pcb is null");
         return LwipError::Ok;
     };
@@ -43,7 +43,7 @@ pub unsafe extern "C" fn on_tcp_accept(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn on_tcp_recv(
     arg: *mut c_void,
-    _pcb: *mut lwip_pcb, // Should get the right one from the arg as we're only dealing with single requests.
+    pcb: *mut lwip_pcb,
     pbuf: *mut lwip_pbuf,
     _err: LwipError,
 ) -> LwipError {
@@ -52,15 +52,22 @@ pub unsafe extern "C" fn on_tcp_recv(
     }
     let sock = unsafe { &*(arg as *const super::TcpSocket) };
 
+    let Ok(pcb) = InThreadTcpProtocolControlBlock::try_from(pcb) else {
+        log_error!("pcb is null");
+        return LwipError::Ok;
+    };
+
     let Ok(pbuf) = ZeroCopyPacketBuffer::try_from(pbuf) else {
         log_info!("Remote host closed connection");
-        sock.close();
+        // NOTE: I think the channel size is larger than the
+        // number of concurrent pbufs so we should always succeed.
+        let _ = sock.packets.try_send(None);
         return LwipError::Ok;
     };
 
     let len = pbuf.total_len();
     if sock.packets.try_send(Some(pbuf)).is_ok() {
-        sock.recevd_in_lwip_thread(len);
+        pcb.recved(len);
         LwipError::Ok
     } else {
         log_error!("Channel full");
@@ -71,8 +78,9 @@ pub unsafe extern "C" fn on_tcp_recv(
 #[unsafe(no_mangle)]
 unsafe extern "C" fn on_tcp_err(arg: *mut c_void, _err: LwipError) {
     if !arg.is_null() {
+        log_error!("on_tcp_err");
         let sock = unsafe { &*(arg as *const super::TcpSocket) };
-        sock.close();
+        let _ = sock.packets.try_send(None);
     }
 }
 

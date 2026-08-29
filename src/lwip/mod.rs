@@ -9,7 +9,7 @@ use crate::{
         self,
         bindings::lwip_pcb,
         callbacks::on_tcp_accept,
-        tcp::TcpProtocolControlBlock,
+        tcp::OutThreadTcpProtocolControlBlock,
         tcp_socket::TcpSocket,
         udp::{UdpProtocolControlBlock, UdpSocket},
     },
@@ -56,33 +56,25 @@ pub fn init_udp_service() -> Option<&'static UdpSocket> {
 
 pub fn init_tcp_service() -> &'static TcpSocket {
     let tcp_socket = TCP_SOCKET.init(TcpSocket::default());
-    lwip::core::with_lwip_core(|core| {
-        // TCP Service
-        if let Ok(tcp) = TcpProtocolControlBlock::try_from(&TCP_SERVICE_PCB) {
-            log_info!("Removing existing TCP service");
-            let _ = tcp.close_with_core(&core);
-        }
-
-        match TcpProtocolControlBlock::new(&core) {
-            Ok(tcp) => {
-                let err = tcp.bind_with_core(8080, &core);
-                match err {
-                    Ok(_) => {
-                        if let Ok(tcp) = tcp.listen_with_backlog_with_core(1, &core) {
-                            tcp.arg_with_core(tcp_socket as *mut _ as *mut c_void, &core);
-                            tcp.accept_with_core(Some(on_tcp_accept), &core);
-                            TCP_SERVICE_PCB.store(tcp.as_mut_ptr(), Ordering::SeqCst);
-                            log_info!("TCP UP on 8080...");
-                        }
-                    }
-                    Err(_) => {
-                        let _ = tcp.close_with_core(&core);
+    lwip::core::with_lwip_core(|core| match OutThreadTcpProtocolControlBlock::new(&core) {
+        Ok(tcp) => {
+            let err = tcp.bind(8080, &core);
+            match err {
+                Ok(_) => {
+                    if let Ok(tcp) = tcp.listen_with_backlog(1, &core) {
+                        tcp.arg(tcp_socket as *mut _ as *mut c_void, &core);
+                        tcp.accept(Some(on_tcp_accept), &core);
+                        TCP_SERVICE_PCB.store(tcp.as_mut_ptr(), Ordering::SeqCst);
+                        log_info!("TCP UP on 8080...");
                     }
                 }
+                Err(_) => {
+                    let _ = tcp.close(&core);
+                }
             }
-            Err(_) => {
-                log_error!("TCP block not created");
-            }
+        }
+        Err(_) => {
+            log_error!("TCP block not created");
         }
     });
     tcp_socket
