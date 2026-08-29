@@ -32,7 +32,7 @@ if ! grep -q "derusting_main();" ${BUDDY_MAIN}; then
   sed -i '/metrics_reconfigure();/a \      derusting_main();' ${BUDDY_MAIN}
 fi
 
-NEW_HEAP_SIZE=61440
+NEW_HEAP_SIZE=40960 # 61440 (40960 - Original)
 NEW_LINE="#define configTOTAL_HEAP_SIZE ((size_t)$NEW_HEAP_SIZE)"
 RTOS_CONFIG=buddy/include/stm32f4_hal/FreeRTOSConfig.h
 if grep -qF "$NEW_LINE" "$RTOS_CONFIG"; then
@@ -46,13 +46,13 @@ cd ./buddy || {
   echo "Failed to find buddy dir"
 }
 
-#python utils/build.py --preset mini --build-type release --bootloader no
-python utils/build.py --preset mini --build-type release --bootloader no \
-  -DWUI:STRING=YES \
-  -DBUDDY_ENABLE_WUI:BOOL=YES \
-  -DCONNECT:STRING=NO \
-  -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
-  -DHAS_NFC:BOOL=OFF
+python utils/build.py --preset mini --build-type release --bootloader no
+#python utils/build.py --preset mini --build-type release --bootloader no \
+#  -DWUI:STRING=YES \
+#  -DBUDDY_ENABLE_WUI:BOOL=YES \
+#  -DCONNECT:STRING=NO \
+#  -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
+#  -DHAS_NFC:BOOL=OFF
 
 cd ..
 

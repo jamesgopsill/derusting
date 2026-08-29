@@ -11,7 +11,6 @@ use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
 use static_cell::StaticCell;
 
 use crate::{
-    chanfs::test_file,
     free_rtos::{
         alloc::FreeRtosAllocator,
         bindings::{RtosTask, RtosTaskParams, vTaskDelay, xTaskGetCurrentTaskHandle},
@@ -20,16 +19,18 @@ use crate::{
         time_driver::FreeRtosTimeDriver,
     },
     lwip::{init_tcp_service, init_udp_service},
+    marlin::{dry_print, home},
     tasks::{heartbeat, tcp_task, tcp_task_logic, write_file},
 };
 
 extern crate alloc;
 
-mod chanfs;
 mod free_rtos;
+mod fs;
 mod http;
 mod log;
 mod lwip;
+mod marlin;
 mod panic;
 mod tasks;
 
@@ -60,7 +61,7 @@ pub unsafe extern "C" fn derusting_main() {
     match Task::try_from(&TASK) {
         Ok(_) => log_info!("Embassy has been created"),
         // No task (i.e., null ptr) so create it (7 max)
-        Err(_) => match Task::new(c"Embassy", 512 * 4, 5, embassy) {
+        Err(_) => match Task::new(c"Embassy", 512 * 6, 5, embassy) {
             Ok(t) => {
                 log_info!("Embassy task created.");
                 TASK.store(t.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
@@ -84,12 +85,9 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
         log_error!("We should only be called within a FreeRTOS task.");
     }
 
-    // A little FS test.
-    log_info!("FS Test");
-    //test_file();
-    //test_file();
+    home();
 
-    // let _udp_sock = init_udp_service();
+    let _udp_sock = init_udp_service();
     let tcp_sock = init_tcp_service();
 
     log_info!("Initialising Executor");

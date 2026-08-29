@@ -1,13 +1,11 @@
-use embassy_time::{Duration, Timer, WithTimeout as _};
+use embassy_time::Timer;
 
 use crate::{
-    chanfs::{FileMode, fs_close, fs_open, fs_write, test_file},
-    http::{
-        BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK,
-        REQUEST_TIMEOUT,
-    },
+    fs::{File, test_file},
+    http::{BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK},
     log_error, log_info,
     lwip::tcp_socket::TcpSocket,
+    marlin::dry_print,
 };
 
 #[embassy_executor::task(pool_size = 1)]
@@ -24,6 +22,7 @@ pub async fn heartbeat() {
 #[embassy_executor::task(pool_size = 1)]
 pub async fn write_file() {
     Timer::after_secs(5).await;
+    log_info!("Attempting to write file");
     test_file();
 }
 
@@ -71,17 +70,14 @@ pub async fn tcp_task_logic(sock: &'static TcpSocket) {
                     continue;
                 };
 
-                let Ok(flock) = fs_open(
-                    c"test.txt",
-                    FileMode::READ | FileMode::WRITE | FileMode::CREATE_ALWAYS,
-                ) else {
+                let Ok(f) = File::open(c"/usb/rust.gcode", c"wb") else {
                     sock.write_and_close(INTERNAL_SERVER_ERROR.as_bytes());
                     continue;
                 };
 
                 // Write bytes to file from current chunk
                 let to_write = core::cmp::min(content_length, body.len());
-                let _ = fs_write(&body[..to_write], flock);
+                let _ = f.write(&body[..to_write]);
                 content_length = content_length.saturating_sub(to_write);
 
                 // Check the rest of the existing chain
@@ -89,7 +85,7 @@ pub async fn tcp_task_logic(sock: &'static TcpSocket) {
                 for chunk in iter {
                     log_info!("Chunk Length: {}", chunk.len());
                     let to_write = core::cmp::min(content_length, chunk.len());
-                    let _ = fs_write(&chunk[..to_write], flock);
+                    let _ = f.write(&chunk[..to_write]);
                     content_length = content_length.saturating_sub(to_write);
                     if content_length == 0 {
                         more_packets_needed = false;
@@ -107,7 +103,7 @@ pub async fn tcp_task_logic(sock: &'static TcpSocket) {
                         for chunk in pbuf.iter() {
                             log_info!("Chunk Length: {}", chunk.len());
                             let to_write = core::cmp::min(content_length, chunk.len());
-                            let _ = fs_write(&chunk[..to_write], flock);
+                            let _ = f.write(&chunk[..to_write]);
                             content_length = content_length.saturating_sub(to_write);
                             if content_length == 0 {
                                 break;
@@ -116,8 +112,10 @@ pub async fn tcp_task_logic(sock: &'static TcpSocket) {
                     }
                 }
 
-                let _ = fs_close(flock);
+                f.close();
                 sock.write_and_close(OK.as_bytes());
+                Timer::after_micros(500).await;
+                dry_print();
             }
         }
     }

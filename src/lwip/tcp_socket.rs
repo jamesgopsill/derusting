@@ -12,11 +12,11 @@ use crate::{
 };
 
 pub struct TcpSocket {
-    pub packets: Channel<CriticalSectionRawMutex, Option<ZeroCopyPacketBuffer>, 2>,
+    pub packets: Channel<CriticalSectionRawMutex, Option<ZeroCopyPacketBuffer>, 10>,
     pub pcb: Mutex<CriticalSectionRawMutex, RefCell<Option<TcpProtocolControlBlock>>>,
 }
 
-impl<'a> Default for TcpSocket {
+impl Default for TcpSocket {
     fn default() -> Self {
         Self {
             packets: Channel::new(),
