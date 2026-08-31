@@ -79,6 +79,7 @@ impl Drop for File {
     }
 }
 
+#[allow(unused)]
 pub fn test_file() {
     if let Ok(f) = File::open(c"/usb/test.txt", FileMode::Write) {
         log_info!("Test File Opened");

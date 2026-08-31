@@ -15,6 +15,7 @@ pub fn is_idle() -> bool {
     unsafe { derusting_is_idle() }
 }
 
+#[allow(unused)]
 pub fn dry_print() {
     if is_idle() {
         log_info!("Dry Print Initiated");

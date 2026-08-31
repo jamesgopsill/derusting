@@ -1,8 +1,13 @@
 use core::ffi::c_void;
 
+use alloc::boxed::Box;
+
 use crate::{
     log_error, log_info,
-    lwip::{packet_buffer::ZeroCopyPacketBuffer, tcp::InThreadTcpProtocolControlBlock},
+    lwip::{
+        packet_buffer::ZeroCopyPacketBuffer,
+        tcp::{InThreadTcpProtocolControlBlock, TcpHandle},
+    },
 };
 
 use super::bindings::*;
@@ -15,6 +20,7 @@ pub unsafe extern "C" fn on_tcp_accept(
     pcb: *mut lwip_pcb,
     err: LwipError,
 ) -> LwipError {
+    log_info!("on_accept");
     if err != LwipError::Ok {
         log_error!("TCPError");
         return LwipError::Ok;
@@ -29,13 +35,24 @@ pub unsafe extern "C" fn on_tcp_accept(
         return LwipError::Ok;
     }
 
-    pcb.arg(arg);
     pcb.recv(Some(on_tcp_recv));
     pcb.err(Some(on_tcp_err));
     pcb.sent(Some(on_tcp_sent));
 
-    let tcp_socket = unsafe { &*(arg as *const super::TcpSocket) };
-    tcp_socket.on_accept_add_pcb(pcb);
+    // Construct a new TcpHandle. Get a ptr to it and reconstruct
+    // it as we need the ptr to pass back to C for it recv fcn and
+    // the boxed version is passed to the handle to manage its life
+    // on the Rust end.
+    let tcp_handle = Box::new(TcpHandle::new(pcb));
+    let ptr = Box::into_raw(tcp_handle);
+    let mut tcp_handle = unsafe { Box::from_raw(ptr) };
+    tcp_handle.recv_arg(ptr as *mut c_void);
+
+    log_info!("Sending handle");
+    let tcp_handler = unsafe { &*(arg as *const super::TcpHandler) };
+    if tcp_handler.try_send(tcp_handle).is_err() {
+        log_error!("TCP Handler channel full");
+    };
 
     LwipError::Ok
 }
@@ -50,7 +67,8 @@ pub unsafe extern "C" fn on_tcp_recv(
     if arg.is_null() {
         return LwipError::Ok;
     }
-    let sock = unsafe { &*(arg as *const super::TcpSocket) };
+
+    let tcp_handle = unsafe { &*(arg as *const TcpHandle) };
 
     let Ok(pcb) = InThreadTcpProtocolControlBlock::try_from(pcb) else {
         log_error!("pcb is null");
@@ -61,12 +79,12 @@ pub unsafe extern "C" fn on_tcp_recv(
         log_info!("Remote host closed connection");
         // NOTE: I think the channel size is larger than the
         // number of concurrent pbufs so we should always succeed.
-        let _ = sock.packets.try_send(None);
+        let _ = tcp_handle.packets.try_send(None);
         return LwipError::Ok;
     };
 
     let len = pbuf.total_len();
-    if sock.packets.try_send(Some(pbuf)).is_ok() {
+    if tcp_handle.packets.try_send(Some(pbuf)).is_ok() {
         pcb.recved(len);
         LwipError::Ok
     } else {
@@ -79,8 +97,8 @@ pub unsafe extern "C" fn on_tcp_recv(
 unsafe extern "C" fn on_tcp_err(arg: *mut c_void, _err: LwipError) {
     if !arg.is_null() {
         log_error!("on_tcp_err");
-        let sock = unsafe { &*(arg as *const super::TcpSocket) };
-        let _ = sock.packets.try_send(None);
+        let tcp_handle = unsafe { &*(arg as *const TcpHandle) };
+        let _ = tcp_handle.packets.try_send(None);
     }
 }
 

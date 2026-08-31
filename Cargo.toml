@@ -33,3 +33,13 @@ embassy-time = {
 }
 portable-atomic = "1"
 static_cell = "2"
+serde = {
+  version = "1",
+  default-features = false,
+  features = ["derive"]
+}
+postcard = {
+  version = "1",
+  default-features = false,
+  features = ["alloc"]
+}

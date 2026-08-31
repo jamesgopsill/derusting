@@ -7,7 +7,7 @@ use embassy_sync::{
 use portable_atomic::AtomicPtr;
 
 use crate::lwip::{
-    bindings::*, core::LwipCore, ipaddr::IpAddr, packet_buffer::ZeroCopyPacketBuffer,
+    self, bindings::*, core::LwipCore, ipaddr::IpAddr, packet_buffer::ZeroCopyPacketBuffer,
 };
 
 pub struct UdpProtocolControlBlock {
@@ -56,14 +56,16 @@ impl UdpProtocolControlBlock {
         };
     }
 
-    /*
-    pub fn sendto(&self, pbuf: PacketBuffer, port: u16, _core: &LwipCore) -> Result<(), LwipError> {
-        log_info!("udp_sendto");
+    pub fn broadcast(
+        &self,
+        mut pbuf: ZeroCopyPacketBuffer,
+        port: u16,
+        _core: &LwipCore,
+    ) -> Result<(), LwipError> {
         let addr: lwip_ipaddr = lwip_ipaddr { addr: u32::MAX };
         let err = unsafe { udp_sendto(self.as_mut_ptr(), pbuf.as_mut_ptr(), &addr, port) };
         err.into()
     }
-    */
 
     pub fn new(_core: &LwipCore) -> Result<UdpProtocolControlBlock, ()> {
         let pcb = unsafe { udp_new() };
@@ -75,14 +77,8 @@ impl UdpProtocolControlBlock {
     }
 }
 
-#[allow(unused)]
-pub struct UdpDatagram {
-    pub from: IpAddr,
-    pub packet: ZeroCopyPacketBuffer,
-}
-
 pub struct UdpSocket {
-    pub packets: Channel<CriticalSectionRawMutex, UdpDatagram, 2>,
+    pub packets: Channel<CriticalSectionRawMutex, (IpAddr, ZeroCopyPacketBuffer), 5>,
     pub pcb: Mutex<CriticalSectionRawMutex, RefCell<UdpProtocolControlBlock>>,
 }
 
@@ -92,6 +88,15 @@ impl UdpSocket {
             packets: Channel::new(),
             pcb: Mutex::new(RefCell::new(pcb)),
         }
+    }
+
+    pub fn broadcast(&self, pbuf: ZeroCopyPacketBuffer, port: u16) -> Result<(), LwipError> {
+        lwip::core::with_lwip_core(|core| {
+            self.pcb.lock(|pcb| {
+                let pcb = pcb.borrow_mut();
+                pcb.broadcast(pbuf, port, &core)
+            })
+        })
     }
 }
 
@@ -116,11 +121,6 @@ unsafe extern "C" fn on_udp_recv(
         return;
     };
 
-    let msg = UdpDatagram {
-        from: addr,
-        packet: pb,
-    };
-
     // NOTE. may have to handle missed sends to clean them up.
-    let _ = socket.packets.try_send(msg);
+    let _ = socket.packets.try_send((addr, pb));
 }

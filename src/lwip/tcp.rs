@@ -1,6 +1,12 @@
 use core::ffi::c_void;
 
-use crate::lwip::{bindings::*, core::LwipCore};
+use alloc::boxed::Box;
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
+
+use crate::{
+    log_error,
+    lwip::{self, bindings::*, core::LwipCore, packet_buffer::ZeroCopyPacketBuffer},
+};
 
 #[derive(Debug)]
 pub struct InThreadTcpProtocolControlBlock {
@@ -158,6 +164,70 @@ impl InThreadTcpProtocolControlBlock {
     pub fn sent(&self, callback: Option<TcpSentFn>) {
         unsafe {
             tcp_sent(self.as_mut_ptr(), callback);
+        }
+    }
+}
+
+pub type TcpHandler = embassy_sync::channel::Channel<ThreadModeRawMutex, Box<TcpHandle>, 3>;
+
+pub struct TcpHandle {
+    pub packets:
+        embassy_sync::channel::Channel<ThreadModeRawMutex, Option<ZeroCopyPacketBuffer>, 10>,
+    pcb: OutThreadTcpProtocolControlBlock,
+    closed: bool,
+}
+
+impl TcpHandle {
+    pub fn new(pcb: InThreadTcpProtocolControlBlock) -> Self {
+        let pcb = OutThreadTcpProtocolControlBlock::from(pcb);
+        Self {
+            packets: Channel::new(),
+            pcb,
+            closed: false,
+        }
+    }
+
+    pub fn recv_arg(&mut self, arg: *mut c_void) {
+        self.pcb.inner.arg(arg);
+    }
+
+    pub fn close(&mut self) {
+        lwip::core::with_lwip_core(|core| {
+            self.pcb.recv(None, &core);
+            self.pcb.err(None, &core);
+            self.pcb.sent(None, &core);
+            self.pcb.accept(None, &core);
+            if let Err(e) = self.pcb.output(&core) {
+                log_error!("handler.close(): {e:?}");
+            }
+            if let Err(e) = self.pcb.close(&core) {
+                log_error!("handler.close(): {e:?}");
+            }
+        });
+        self.packets.clear();
+        self.closed = true;
+    }
+
+    // Out of thread function
+    pub fn respond(&mut self, bytes: &[u8]) {
+        // Can only send once. Ignore repeated calls.
+        if !self.closed {
+            lwip::core::with_lwip_core(|core| {
+                if let Err(e) = self.pcb.write(bytes, &core) {
+                    log_error!("handler.send_response(): {e:?}");
+                }
+            });
+            self.close();
+        }
+    }
+}
+
+impl Drop for TcpHandle {
+    // If we haven't closed the handle then close it before
+    // we drop it.
+    fn drop(&mut self) {
+        if !self.closed {
+            self.close();
         }
     }
 }

@@ -20,7 +20,10 @@ use crate::{
     },
     lwip::{init_tcp_service, init_udp_service},
     marlin::{is_ready, set_offline},
-    tasks::{heartbeat, tcp_task, tcp_task_logic, write_file},
+    tasks::{
+        tcp::tcp_handler_task,
+        udp::{heartbeat, udp_receiver},
+    },
 };
 
 extern crate alloc;
@@ -43,7 +46,6 @@ embassy_time_driver::time_driver_impl!(static DRIVER: FreeRtosTimeDriver = FreeR
     queue: Mutex::new(RefCell::new(Queue::new())),
     timekeeper: AtomicU64::new(u64::MIN),
     free_rtos_now: AtomicU32::new(u32::MIN),
-
 });
 
 /// Keep track of our FreeRTOS task that is running our Embassy executor.
@@ -61,7 +63,7 @@ pub unsafe extern "C" fn derusting_main() {
     match Task::try_from(&TASK) {
         Ok(_) => log_info!("Embassy has been created"),
         // No task (i.e., null ptr) so create it (7 max)
-        Err(_) => match Task::new(c"Embassy", 512 * 2, 1, embassy) {
+        Err(_) => match Task::new(c"Embassy", 512 * 4, 1, embassy) {
             Ok(t) => {
                 log_info!("Embassy task created.");
                 TASK.store(t.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
@@ -85,32 +87,29 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
         log_error!("We should only be called within a FreeRTOS task.");
     }
 
-    // home();
-
     log_info!("Is Ready: {}", is_ready());
     set_offline();
 
-    let _udp_sock = init_udp_service();
-    let tcp_sock = init_tcp_service();
+    let udp_sock = init_udp_service();
+    let tcp_handler = init_tcp_service();
 
     log_info!("Initialising Executor");
     let executor = EXECUTOR.init(FreeRtosTaskExecutor::new(current_task as _));
 
     executor.run(|spawner| {
-        match heartbeat() {
-            Ok(t) => spawner.spawn(t),
-            Err(e) => log_error!("Spawn Error: {e}"),
+        if let Some(udp_sock) = udp_sock {
+            match heartbeat(udp_sock) {
+                Ok(t) => spawner.spawn(t),
+                Err(e) => log_error!("Spawn Error: {e}"),
+            }
+            match udp_receiver(udp_sock) {
+                Ok(t) => spawner.spawn(t),
+                Err(e) => log_error!("Spawn Error: {e}"),
+            }
+        } else {
+            log_error!("No UDP socket");
         }
-        match write_file() {
-            Ok(t) => spawner.spawn(t),
-            Err(e) => log_error!("Spawn Error: {e}"),
-        }
-        let tcp_fut = tcp_task_logic(tcp_sock);
-        log_info!(
-            "Size of TCP Future: {} bytes",
-            core::mem::size_of_val(&tcp_fut)
-        );
-        match tcp_task(tcp_sock) {
+        match tcp_handler_task(tcp_handler, spawner) {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),
         }

@@ -36,6 +36,17 @@ impl TryFrom<*mut lwip_pbuf> for ZeroCopyPacketBuffer {
 }
 
 impl ZeroCopyPacketBuffer {
+    pub fn alloc() -> Option<Self> {
+        let pbuf = unsafe { pbuf_alloc(PbufLayer::Transport, 1024, PbufType::Ram) };
+        match pbuf.is_null() {
+            true => None,
+            false => Some(Self {
+                inner: pbuf,
+                current: pbuf,
+            }),
+        }
+    }
+
     pub fn total_len(&self) -> u16 {
         unsafe { (*self.inner).tot_len }
     }
@@ -47,6 +58,16 @@ impl ZeroCopyPacketBuffer {
             current,
             _phantom: PhantomData,
         }
+    }
+
+    pub fn as_mut_ptr(&mut self) -> *mut lwip_pbuf {
+        self.inner
+    }
+
+    pub fn with_payload(&mut self, fcn: impl FnOnce(&mut [u8]) -> bool) -> bool {
+        let payload_ptr = unsafe { (*self.inner).payload };
+        let payload = unsafe { core::slice::from_raw_parts_mut(payload_ptr, 1024) };
+        fcn(payload)
     }
 }
 
