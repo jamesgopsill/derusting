@@ -24,13 +24,14 @@ pub mod tcp;
 pub mod udp;
 
 // Static handles for our UDP Service.
+pub const UDP_PORT: u16 = 9000;
 pub static UDP_SOCKET: StaticCell<UdpSocket> = StaticCell::new();
 
 pub fn init_udp_service() -> Option<&'static UdpSocket> {
     let mut sock: Option<&'static UdpSocket> = None;
     lwip::core::with_lwip_core(|core| {
         if let Ok(pcb) = UdpProtocolControlBlock::new(&core) {
-            match pcb.bind(9000, &core) {
+            match pcb.bind(UDP_PORT, &core) {
                 Err(_) => {
                     log_error!("Failed to bind on 9000");
                     pcb.remove(&core);

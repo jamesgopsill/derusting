@@ -2,7 +2,7 @@ use embassy_time::Timer;
 
 use crate::{
     log_error, log_info,
-    lwip::{packet_buffer::ZeroCopyPacketBuffer, udp::UdpSocket},
+    lwip::{UDP_PORT, packet_buffer::ZeroCopyPacketBuffer, udp::UdpSocket},
     tasks::messages::NetworkMessage,
 };
 
@@ -10,10 +10,10 @@ use crate::{
 pub async fn heartbeat(sock: &'static UdpSocket) {
     loop {
         if let Some(pbuf) = ZeroCopyPacketBuffer::alloc(NetworkMessage::heartbeat()) {
-            if sock.broadcast(pbuf, 9000).is_err() {
+            if sock.broadcast(pbuf, UDP_PORT).is_err() {
                 log_error!("Broadcast failed.");
             } else {
-                log_info!("Heartbeat broadcasted on 9000");
+                log_info!("Heartbeat broadcasted on {}", UDP_PORT);
             }
         }
         Timer::after_secs(5).await;
