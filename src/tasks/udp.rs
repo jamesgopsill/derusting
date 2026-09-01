@@ -1,5 +1,4 @@
 use embassy_time::Timer;
-use postcard::accumulator::{CobsAccumulator, FeedResult};
 
 use crate::{
     log_error, log_info,
@@ -10,41 +9,30 @@ use crate::{
 #[embassy_executor::task(pool_size = 1)]
 pub async fn heartbeat(sock: &'static UdpSocket) {
     loop {
-        if let Some(mut pbuf) = ZeroCopyPacketBuffer::alloc() {
-            let hb = NetworkMessage::heartbeat();
-            let res = pbuf.with_payload(|payload| postcard::to_slice(&hb, payload).is_ok());
-            if res && sock.broadcast(pbuf, 9000).is_err() {
+        if let Some(pbuf) = ZeroCopyPacketBuffer::alloc(NetworkMessage::heartbeat()) {
+            if sock.broadcast(pbuf, 9000).is_err() {
                 log_error!("Broadcast failed.");
+            } else {
+                log_info!("Heartbeat broadcasted on 9000");
             }
         }
-        Timer::after_millis(500).await;
+        Timer::after_secs(5).await;
     }
 }
 
 #[embassy_executor::task(pool_size = 1)]
 pub async fn udp_receiver(sock: &'static UdpSocket) {
+    log_info!("Ready to receive UDP packets");
     loop {
         let (_addr, msg) = sock.packets.receive().await;
-
-        let mut accumulator: CobsAccumulator<1024> = CobsAccumulator::new();
-
-        for chunk in msg.iter() {
-            // feed() returns the remaining unused bytes from the chunk
-            match accumulator.feed::<NetworkMessage>(chunk) {
-                FeedResult::Consumed => break, // Need more data
-                FeedResult::Success {
-                    data: _,
-                    remaining: _,
-                } => {
-                    log_info!("udp_recevier(): Packet Deserialised")
-                }
-                FeedResult::DeserError(_rem) => {
-                    log_error!("udp_receiver(): Deserialization error")
-                }
-                FeedResult::OverFull(_rem) => {
-                    log_error!("udp_receiver(): Overfull error")
-                }
-            };
+        log_info!("Packet received");
+        if let Some(msg) = msg.iter().next() {
+            match postcard::from_bytes::<NetworkMessage>(msg) {
+                Ok(network_msg) => match network_msg {
+                    NetworkMessage::Heartbeat(h) => log_info!("Heartbeat: alive={}", h.alive),
+                },
+                Err(_) => log_error!("Deserialization failed for packet: {:02X?}", msg),
+            }
         }
     }
 }

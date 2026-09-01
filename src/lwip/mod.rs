@@ -21,16 +21,10 @@ pub mod core;
 pub mod ipaddr;
 pub mod packet_buffer;
 pub mod tcp;
-// pub mod tcp_socket;
 pub mod udp;
 
 // Static handles for our UDP Service.
 pub static UDP_SOCKET: StaticCell<UdpSocket> = StaticCell::new();
-
-// Static handles for our TCP Service.
-//pub static TCP_SOCKET: StaticCell<TcpSocket> = StaticCell::new();
-pub static TCP_SERVICE_PCB: AtomicPtr<lwip_pcb> = AtomicPtr::new(ptr::null_mut());
-pub static TCP_HANDLER: StaticCell<TcpHandler> = StaticCell::new();
 
 pub fn init_udp_service() -> Option<&'static UdpSocket> {
     let mut sock: Option<&'static UdpSocket> = None;
@@ -43,7 +37,7 @@ pub fn init_udp_service() -> Option<&'static UdpSocket> {
                 }
                 Ok(_) => {
                     let s = UDP_SOCKET.init(UdpSocket::new(pcb));
-                    s.pcb.lock(|rc| rc.borrow_mut().recv(s, &core));
+                    s.pcb.lock(|pcb| pcb.recv(s, &core));
                     log_info!("UDP Service Available on 9000...");
                     sock = Some(s);
                 }
@@ -54,6 +48,10 @@ pub fn init_udp_service() -> Option<&'static UdpSocket> {
     });
     sock
 }
+
+// Static handles for our TCP Service.
+pub static TCP_SERVICE_PCB: AtomicPtr<lwip_pcb> = AtomicPtr::new(ptr::null_mut());
+pub static TCP_HANDLER: StaticCell<TcpHandler> = StaticCell::new();
 
 pub fn init_tcp_service() -> &'static TcpHandler {
     let tcp_handler = TCP_HANDLER.init(Channel::new());

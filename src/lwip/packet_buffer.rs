@@ -1,6 +1,10 @@
 use core::marker::PhantomData;
 
 use alloc::slice;
+use postcard::ser_flavors::Size;
+use serde::Serialize;
+
+use crate::log_error;
 
 use super::bindings::*;
 
@@ -36,15 +40,27 @@ impl TryFrom<*mut lwip_pbuf> for ZeroCopyPacketBuffer {
 }
 
 impl ZeroCopyPacketBuffer {
-    pub fn alloc() -> Option<Self> {
-        let pbuf = unsafe { pbuf_alloc(PbufLayer::Transport, 1024, PbufType::Ram) };
-        match pbuf.is_null() {
-            true => None,
-            false => Some(Self {
-                inner: pbuf,
-                current: pbuf,
-            }),
+    pub fn alloc<T: Serialize>(msg: T) -> Option<Self> {
+        let Ok(size) = postcard::serialize_with_flavor(&msg, Size::default()) else {
+            log_error!("serialize_with_flavor error");
+            return None;
+        };
+        let pbuf = unsafe { pbuf_alloc(PbufLayer::Transport, size as u16, PbufType::Ram) };
+        if pbuf.is_null() {
+            log_error!("NULL pbuf");
+            return None;
         }
+        let payload_ptr = unsafe { (*pbuf).payload };
+        let payload = unsafe { core::slice::from_raw_parts_mut(payload_ptr, size) };
+        if let Err(_) = postcard::to_slice(&msg, payload) {
+            log_error!("Serialization error");
+            unsafe { pbuf_free(pbuf) };
+            return None;
+        }
+        Some(Self {
+            inner: pbuf,
+            current: pbuf,
+        })
     }
 
     pub fn total_len(&self) -> u16 {
@@ -62,12 +78,6 @@ impl ZeroCopyPacketBuffer {
 
     pub fn as_mut_ptr(&mut self) -> *mut lwip_pbuf {
         self.inner
-    }
-
-    pub fn with_payload(&mut self, fcn: impl FnOnce(&mut [u8]) -> bool) -> bool {
-        let payload_ptr = unsafe { (*self.inner).payload };
-        let payload = unsafe { core::slice::from_raw_parts_mut(payload_ptr, 1024) };
-        fcn(payload)
     }
 }
 

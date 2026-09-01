@@ -1,13 +1,16 @@
-use core::{cell::RefCell, ffi::c_void, sync::atomic::Ordering};
+use core::{ffi::c_void, sync::atomic::Ordering};
 
 use embassy_sync::{
-    blocking_mutex::{Mutex, raw::CriticalSectionRawMutex},
+    blocking_mutex::{Mutex, raw::ThreadModeRawMutex},
     channel::Channel,
 };
 use portable_atomic::AtomicPtr;
 
-use crate::lwip::{
-    self, bindings::*, core::LwipCore, ipaddr::IpAddr, packet_buffer::ZeroCopyPacketBuffer,
+use crate::{
+    log_info,
+    lwip::{
+        self, bindings::*, core::LwipCore, ipaddr::IpAddr, packet_buffer::ZeroCopyPacketBuffer,
+    },
 };
 
 pub struct UdpProtocolControlBlock {
@@ -64,6 +67,7 @@ impl UdpProtocolControlBlock {
     ) -> Result<(), LwipError> {
         let addr: lwip_ipaddr = lwip_ipaddr { addr: u32::MAX };
         let err = unsafe { udp_sendto(self.as_mut_ptr(), pbuf.as_mut_ptr(), &addr, port) };
+        log_info!("Broadcast result: {:?}", err);
         err.into()
     }
 
@@ -78,25 +82,21 @@ impl UdpProtocolControlBlock {
 }
 
 pub struct UdpSocket {
-    pub packets: Channel<CriticalSectionRawMutex, (IpAddr, ZeroCopyPacketBuffer), 5>,
-    pub pcb: Mutex<CriticalSectionRawMutex, RefCell<UdpProtocolControlBlock>>,
+    pub packets: Channel<ThreadModeRawMutex, (IpAddr, ZeroCopyPacketBuffer), 5>,
+    pub pcb: Mutex<ThreadModeRawMutex, UdpProtocolControlBlock>,
 }
 
 impl UdpSocket {
     pub fn new(pcb: UdpProtocolControlBlock) -> Self {
         Self {
             packets: Channel::new(),
-            pcb: Mutex::new(RefCell::new(pcb)),
+            pcb: Mutex::new(pcb),
         }
     }
 
     pub fn broadcast(&self, pbuf: ZeroCopyPacketBuffer, port: u16) -> Result<(), LwipError> {
-        lwip::core::with_lwip_core(|core| {
-            self.pcb.lock(|pcb| {
-                let pcb = pcb.borrow_mut();
-                pcb.broadcast(pbuf, port, &core)
-            })
-        })
+        log_info!("Socket broadcasting");
+        lwip::core::with_lwip_core(|core| self.pcb.lock(|pcb| pcb.broadcast(pbuf, port, &core)))
     }
 }
 
