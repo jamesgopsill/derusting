@@ -20,6 +20,8 @@ use crate::{
     },
 };
 
+/// This task receives new tcp handlers and spawns
+/// tasks to manage each one.
 #[embassy_executor::task(pool_size = 1)]
 pub async fn tcp_handler_task(
     handler: &'static TcpHandler,
@@ -32,11 +34,16 @@ pub async fn tcp_handler_task(
         log_info!("Received new handle");
         match tcp_handle_task(new_handle, udp) {
             Ok(t) => spawner.spawn(t),
+            // TODO: return a service unavailable error but for now
+            // we have more tasks than the permitted number of requests
+            // in the lwip backlog.
             Err(e) => log_error!("Spawn Error: {e}"),
         }
     }
 }
 
+/// A task that handles TCP requests for the printer. There is only `GET /` and `PUT /` to
+/// retrieve the submission and put files onto the network for processing.
 #[embassy_executor::task(pool_size = 2)]
 pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket) {
     log_info!("New Task");
@@ -190,6 +197,8 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
     }
 }
 
+/// Takes the incoming TCP request and separates the start_line, headers and body
+/// for further processing.
 fn split_request(buf: &[u8]) -> Option<(&str, &str, &[u8])> {
     let delim = b"\r\n";
     let idx = buf.windows(delim.len()).position(|win| win == delim)?;
@@ -208,6 +217,7 @@ fn split_request(buf: &[u8]) -> Option<(&str, &str, &[u8])> {
     Some((start_line, headers, body))
 }
 
+/// Checks whether the `start_line` is a valid address that we respond to.
 fn check_start_line(start_line: &str) -> Result<Method, &'static str> {
     let mut tokens = start_line.split(" ");
     let Some(method) = tokens.next() else {
@@ -229,6 +239,8 @@ fn check_start_line(start_line: &str) -> Result<Method, &'static str> {
     Ok(method)
 }
 
+/// Analyses the PUT header to ensure it features the information
+/// we require to process the request.
 fn check_put_header(headers: &str) -> Result<usize, &'static str> {
     let mut content_length: usize = 0;
     let mut content_type: bool = false;

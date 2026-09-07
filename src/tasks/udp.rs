@@ -50,6 +50,8 @@ pub async fn udp_receiver(sock: &'static UdpSocket) {
         if let Some(msg) = msg.into_iter().next() {
             match postcard::from_bytes::<NetworkMessage>(msg) {
                 Ok(network_msg) => match network_msg {
+                    // We have received a heartbeat from another machine.
+                    // Lets add/update their entry in our address book.
                     NetworkMessage::Heartbeat(h) => {
                         log_info!("{}: Heartbeat: alive={}", addr, h.alive);
                         let lock = ADDRESS_BOOK.lock().await;
@@ -58,6 +60,9 @@ pub async fn udp_receiver(sock: &'static UdpSocket) {
                             log_error!("Address book error: {e:?}");
                         };
                     }
+                    // We have received a new_job message and the owner of the
+                    // ledger should update the ledger to include the job in
+                    // the list.
                     NetworkMessage::NewJob(new_job) => {
                         let lock = LEDGER.lock().await;
                         let mut ledger = lock.borrow_mut();
@@ -65,7 +70,12 @@ pub async fn udp_receiver(sock: &'static UdpSocket) {
                             let _ = ledger.jobs.insert(new_job.guid);
                         }
                     }
-                    // Note: Future me, improve to handle multiple files at the same.
+                    // We have received a chunk of a gcode file. We can only process
+                    // one file at a time. We check if we're not already processing
+                    // a file. Check whether the chunk_id is the next one in the list.
+                    // TODO: We need to include the uuid of the job as multiple jobs
+                    // at the same time might interfere with one another.
+                    // NOTE: Future me, improve to handle multiple files at the same.
                     NetworkMessage::Chunk(chunk) => {
                         let elapsed = last_chunk.elapsed();
                         if elapsed.as_secs() > 3 {
@@ -148,6 +158,9 @@ pub async fn udp_receiver(sock: &'static UdpSocket) {
 
                         // Ignore the rest...
                     }
+                    // We have received a ledger message which occurs when the
+                    // ledger is being exchanged. We check if we're the new
+                    // owner of the ledger and take control. Otherwise we ignore.
                     NetworkMessage::Ledger(ledger) => {
                         // TODO: Check that the ipaddr of my machine matches
                         // the ipaddr of the owner in the ledger (i.e., it has
@@ -169,6 +182,8 @@ pub async fn udp_receiver(sock: &'static UdpSocket) {
     }
 }
 
+/// This task periodically checks the address book and cleans up
+/// any address have not heard from in a while.
 #[embassy_executor::task(pool_size = 1)]
 pub async fn address_book_lifetime_check() {
     loop {
@@ -182,6 +197,8 @@ pub async fn address_book_lifetime_check() {
     }
 }
 
+/// This task manages the token-ring ledger that is passed between
+/// machines. We only do something if we are the owner of the ledger.
 #[embassy_executor::task(pool_size = 1)]
 pub async fn manage_ledger(sock: &'static UdpSocket) -> ! {
     loop {
@@ -288,6 +305,7 @@ pub async fn manage_ledger(sock: &'static UdpSocket) -> ! {
 
 // TODO: file cleanup.
 
+/// Create the full file path for a given uuid.
 pub fn make_path(job_guid: &Uuid) -> CString<64> {
     let mut path = CString::<64>::new();
     let _ = path.extend_from_bytes(b"/usb/");
