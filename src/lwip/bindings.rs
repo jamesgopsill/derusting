@@ -28,29 +28,55 @@ pub struct lwip_pbuf {
 }
 
 #[repr(C)]
+pub struct lwip_netif {
+    pub next: *mut lwip_netif,
+    pub ip_addr: lwip_ipaddr,
+    pub netmask: lwip_ipaddr,
+    pub gateway: lwip_ipaddr,
+    // ...
+}
+
+#[repr(C)]
 pub struct sys_mutex_t {
     _opaque: [u8; 0],
 }
 
 #[repr(i32)]
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LwipError {
+    #[error("Ok: No error, all is ok")]
     Ok = 0,
+    #[error("Out of memory error")]
     Mem = -1,
+    #[error("Buffer error")]
     Buf = -2,
+    #[error("Timeout")]
     Timeout = -3,
+    #[error("Routing problem")]
     Rte = -4,
+    #[error("Operation in progress")]
     InProgress = -5,
+    #[error("Illegal value")]
     Val = -6,
+    #[error("Operation would block")]
     WouldBlock = -7,
+    #[error("Address in use")]
     Use = -8,
+    #[error("Already connecting / already connected")]
     Already = -9,
+    #[error("Connection already established")]
     IsConn = -10,
+    #[error("Not connected")]
     Conn = -11,
+    #[error("Low-level netif error")]
     If = -12,
+    #[error("Connection aborted")]
     Abrt = -13,
+    #[error("Connection reset")]
     Rst = -14,
+    #[error("Connection closed")]
     Clsd = -15,
+    #[error("Illegal argument")]
     Arg = -16,
 }
 
@@ -126,51 +152,115 @@ pub enum PbufType {
 }
 
 unsafe extern "C" {
-    // TCP
+    // --- TCP Control ---
+
+    /// Creates a new TCP Protocol Control Block (PCB). Returns NULL if out of memory.
     pub(super) fn tcp_new() -> *mut lwip_pcb;
+
+    /// Closes the TCP connection. Frees the PCB.
     pub(super) fn tcp_close(pcb: *mut lwip_pcb) -> LwipError;
+
+    /// Binds the PCB to a local IP address and port.
     pub(super) fn tcp_bind(pcb: *mut lwip_pcb, ipaddr: *const lwip_ipaddr, port: u16) -> LwipError;
+
+    /// Sets the PCB to LISTEN state. Returns a new PCB pointer (the original is freed).
+    /// Backlog limits the number of pending connections.
     pub(super) fn tcp_listen_with_backlog(pcb: *mut lwip_pcb, backlog: u8) -> *mut lwip_pcb;
+
+    /// Sets the custom program argument (void*) that will be passed to all callbacks for this PCB.
     pub(super) fn tcp_arg(pcb: *mut lwip_pcb, arg: *mut c_void);
-    // Callbacks
+
+    // --- TCP Callbacks ---
+
+    /// Registers a callback to be called when a new connection is accepted on a listening PCB.
     pub(super) fn tcp_accept(pcb: *mut lwip_pcb, accept: Option<TcpAcceptFn>);
+
+    /// Registers a callback to be called when data arrives on this PCB.
     pub(super) fn tcp_recv(pcb: *mut lwip_pcb, recv: Option<TcpRecvFn>);
+
+    /// Registers a callback for fatal errors. This PCB will be freed by the stack after this call.
     pub(super) fn tcp_err(pcb: *mut lwip_pcb, err: Option<LwipErrFn>);
+
+    /// Registers a callback to be called when the remote host acknowledges sent data.
     pub(super) fn tcp_sent(arg: *mut lwip_pcb, callback: Option<TcpSentFn>);
-    // Data
+
+    // --- TCP Data Handling ---
+
+    /// Enqueues data to be sent. `apiflags` can be TCP_WRITE_FLAG_COPY or TCP_WRITE_FLAG_MORE.
+    /// Note: This only queues data; call tcp_output to actually send it.
     pub(super) fn tcp_write(
         pcb: *mut lwip_pcb,
         dataptr: *const u8,
         len: u16,
         apiflags: u8,
     ) -> LwipError;
+
+    /// Forces any enqueued data in the transmit buffer to be sent immediately.
     pub(super) fn tcp_output(pcb: *mut lwip_pcb) -> LwipError;
+
+    /// Must be called by the application when it has processed data.
+    /// This increases the TCP receive window. `len` is the number of bytes consumed.
     pub(super) fn tcp_recved(pcb: *mut lwip_pcb, len: u16);
-    // UDP
+
+    // --- UDP ---
+
+    /// Creates a new UDP PCB. Returns NULL if out of memory.
     pub(super) fn udp_new() -> *mut lwip_pcb;
+
+    /// Binds a UDP PCB to a local IP address and port.
     pub(super) fn udp_bind(pcb: *mut lwip_pcb, ipaddr: *const lwip_ipaddr, port: u16) -> LwipError;
+
+    /// Registers a callback for incoming UDP packets.
     pub(super) fn udp_recv(pcb: *mut lwip_pcb, recv_fn: Option<UdpRecvFn>, recv_arg: *mut c_void);
+
+    /// Removes and frees the UDP PCB.
     pub(super) fn udp_remove(pcb: *mut lwip_pcb);
+
+    /// Sends a pbuf to a specific IP and port.
     pub(super) fn udp_sendto(
         pcb: *mut lwip_pcb,
         pbuf: *mut lwip_pbuf,
         ip: *const lwip_ipaddr,
         port: u16,
     ) -> LwipError;
-    // PBUF
+
+    // --- PBUF (Packet Buffer) Management ---
+
+    /// Decrements the reference count of a pbuf. If count hits zero, it is freed.
+    /// Returns the number of pbufs actually freed from the chain.
     pub(super) fn pbuf_free(pbuf: *mut lwip_pbuf) -> u8;
+
+    /// Copies data from a pbuf chain starting at `offset` into a destination `ptr`.
+    /// Returns the number of bytes actually copied.
     pub(super) fn pbuf_copy_partial(
         pbuf: *const lwip_pbuf,
         ptr: *mut u8,
         len: u16,
         offset: u16,
     ) -> u16;
+
+    /// Allocates a pbuf of the specified type and for the specified layer (header space).
     pub(super) fn pbuf_alloc(layer: PbufLayer, length: u16, pbuf_type: PbufType) -> *mut lwip_pbuf;
-    // statics
+
+    // --- System / Core ---
+
+    /// IP address constant representing "Any" (0.0.0.0).
     pub(super) static ip_addr_any: lwip_ipaddr;
+
+    /// Global mutex used for thread-safety in lwIP's OS mode (CORE_LOCKING).
     pub(super) static mut lock_tcpip_core: sys_mutex_t;
-    // core
+
+    /// Platform-specific mutex lock implementation.
     pub(super) fn sys_mutex_lock(mutex: *mut sys_mutex_t);
+
+    /// Platform-specific mutex unlock implementation.
     pub(super) fn sys_mutex_unlock(mutex: *mut sys_mutex_t);
+
+    /// Platform-specific sleep function (milliseconds).
     pub(super) fn sys_msleep(ms: u32);
+
+    // --- Netif (Network Interface) ---
+
+    /// The default network interface used for routing when no specific interface matches.
+    pub(super) static netif_default: *mut lwip_netif;
 }

@@ -31,15 +31,34 @@ embassy-time = {
   version = "0.5",
   features = ["tick-hz-1_000", "generic-queue-8"]
 }
+embedded-io = "0.7"
+getrandom = {
+  version = "0.4",
+  default-features = false
+}
+heapless = {
+  version = "0.9",
+  features = ["serde"]
+}
+uuid = {
+  version = "1",
+  default-features = false,
+  features = ["serde", "v7"]
+}
 portable-atomic = "1"
+postcard = {
+  version = "1",
+  default-features = false,
+  features = ["alloc"]
+}
 static_cell = "2"
 serde = {
   version = "1",
   default-features = false,
   features = ["derive"]
 }
-postcard = {
-  version = "1",
-  default-features = false,
-  features = ["alloc"]
+serde-big-array = "0.5"
+thiserror = {
+  version = "2",
+  default-features = false
 }

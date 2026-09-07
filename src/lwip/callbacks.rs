@@ -5,8 +5,8 @@ use alloc::boxed::Box;
 use crate::{
     log_error, log_info,
     lwip::{
-        packet_buffer::ZeroCopyPacketBuffer,
-        tcp::{InThreadTcpProtocolControlBlock, TcpHandle},
+        packet_buffer::PacketBuffer,
+        tcp::{InThread, TcpHandle, TcpProtocolControlBlock},
     },
 };
 
@@ -26,7 +26,7 @@ pub unsafe extern "C" fn on_tcp_accept(
         return LwipError::Ok;
     }
 
-    let Ok(pcb) = InThreadTcpProtocolControlBlock::try_from(pcb) else {
+    let Ok(pcb) = TcpProtocolControlBlock::<InThread>::try_from(pcb) else {
         log_error!("pcb is null");
         return LwipError::Ok;
     };
@@ -46,7 +46,7 @@ pub unsafe extern "C" fn on_tcp_accept(
     let tcp_handle = Box::new(TcpHandle::new(pcb));
     let ptr = Box::into_raw(tcp_handle);
     let mut tcp_handle = unsafe { Box::from_raw(ptr) };
-    tcp_handle.recv_arg(ptr as *mut c_void);
+    unsafe { tcp_handle.recv_arg(ptr as *mut c_void) };
 
     log_info!("Sending handle");
     let tcp_handler = unsafe { &*(arg as *const super::TcpHandler) };
@@ -70,12 +70,12 @@ pub unsafe extern "C" fn on_tcp_recv(
 
     let tcp_handle = unsafe { &*(arg as *const TcpHandle) };
 
-    let Ok(pcb) = InThreadTcpProtocolControlBlock::try_from(pcb) else {
+    let Ok(pcb) = TcpProtocolControlBlock::<InThread>::try_from(pcb) else {
         log_error!("pcb is null");
         return LwipError::Ok;
     };
 
-    let Ok(pbuf) = ZeroCopyPacketBuffer::try_from(pbuf) else {
+    let Ok(pbuf) = PacketBuffer::try_from(pbuf) else {
         log_info!("Remote host closed connection");
         // NOTE: I think the channel size is larger than the
         // number of concurrent pbufs so we should always succeed.

@@ -8,24 +8,26 @@ use crate::log_error;
 
 use super::bindings::*;
 
-pub struct ZeroCopyPacketBuffer {
+/// A zero copy wapper around a LWIP PBUF.
+pub struct PacketBuffer {
     inner: *mut lwip_pbuf,
     current: *mut lwip_pbuf,
 }
 
-pub struct ZeroCopyPacketBufferIterator<'a> {
+/// An iterator over a pbuf chain to read and process data from.
+pub struct PacketBufferIterator<'a> {
     // Must hold onto the original so it can be dropped
     // once the iterator is done to free the underlying
     // pbuf.
-    _inner: ZeroCopyPacketBuffer,
+    _inner: PacketBuffer,
     current: *mut lwip_pbuf,
     _phantom: PhantomData<&'a [u8]>,
 }
 
-unsafe impl Send for ZeroCopyPacketBuffer {}
-unsafe impl Sync for ZeroCopyPacketBuffer {}
+unsafe impl Send for PacketBuffer {}
+unsafe impl Sync for PacketBuffer {}
 
-impl TryFrom<*mut lwip_pbuf> for ZeroCopyPacketBuffer {
+impl TryFrom<*mut lwip_pbuf> for PacketBuffer {
     type Error = ();
     fn try_from(value: *mut lwip_pbuf) -> Result<Self, ()> {
         if value.is_null() {
@@ -39,7 +41,8 @@ impl TryFrom<*mut lwip_pbuf> for ZeroCopyPacketBuffer {
     }
 }
 
-impl ZeroCopyPacketBuffer {
+impl PacketBuffer {
+    /// Allocate a PacketBuffer from lwip.
     pub fn alloc<T: Serialize>(msg: T) -> Option<Self> {
         let Ok(size) = postcard::serialize_with_flavor(&msg, Size::default()) else {
             log_error!("serialize_with_flavor error");
@@ -63,31 +66,36 @@ impl ZeroCopyPacketBuffer {
         })
     }
 
+    /// Get the total length of data held within a packet buffer chain.
     pub fn total_len(&self) -> u16 {
         unsafe { (*self.inner).tot_len }
     }
 
-    pub fn iter<'a>(self) -> ZeroCopyPacketBufferIterator<'a> {
+    /// Turns a packet buffer into an iterator over the data it holds
+    /// within its chain.
+    pub fn into_iter<'a>(self) -> PacketBufferIterator<'a> {
         let current = self.current;
-        ZeroCopyPacketBufferIterator {
+        PacketBufferIterator {
             _inner: self,
             current,
             _phantom: PhantomData,
         }
     }
 
+    /// Returns the `*mut lwip_pbuf`
     pub fn as_mut_ptr(&mut self) -> *mut lwip_pbuf {
         self.inner
     }
 }
 
-impl Drop for ZeroCopyPacketBuffer {
+impl Drop for PacketBuffer {
     fn drop(&mut self) {
+        // Free the packet buffer so LWIP can allocate it again.
         unsafe { pbuf_free(self.inner) };
     }
 }
 
-impl<'a> Iterator for ZeroCopyPacketBufferIterator<'a> {
+impl<'a> Iterator for PacketBufferIterator<'a> {
     type Item = &'a [u8];
 
     fn next(&mut self) -> Option<Self::Item> {

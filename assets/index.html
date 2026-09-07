@@ -1,16 +1,65 @@
 <!DOCTYPE html>
-<html>
+<title>Upload</title>
+<style>
+  body {
+    font: 14px sans-serif;
+    background: #eee;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 95vh;
+  }
 
-<body>
+  .c {
+    background: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 9px #0003;
+    text-align: center;
+    width: 240px;
+  }
+
+  h1 {
+    margin: 0 0 15px;
+    font-size: 18px;
+  }
+
+  input,
+  button {
+    width: 100%;
+    margin-bottom: 10px;
+  }
+
+  button {
+    background: #2563eb;
+    color: #fff;
+    border: 0;
+    padding: 8px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  button:hover {
+    background: #1d4ed8;
+  }
+</style>
+<div class="c">
+  <h1>Derusting</h1>
+  <p><b>De</b>centralised T<b>rust</b>ed Manufactur<b>ing</b> in <b>Rust</b></p>
   <input type="file" id="f">
-  <button onclick="
-    let file = document.getElementById('f').files[0];
-    fetch('/', {
-      method: 'PUT',
-      headers: { 'x-fname': file.name },
-      body: file
-    });
-  ">Upload G-code</button>
-</body>
-
-</html>
+  <button onclick="u()">Upload G-code</button>
+</div>
+<script>
+  async function u() {
+    let file = f.files[0];
+    if (!file) return alert('Select file');
+    try {
+      let r = await fetch('/', {
+        method: 'PUT',
+        headers: {'x-fname': file.name},
+        body: file
+      });
+      alert(r.ok ? 'Sent' : 'Error');
+    } catch (e) {alert('Fail');}
+  }
+</script>

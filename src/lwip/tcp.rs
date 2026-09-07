@@ -5,110 +5,66 @@ use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 
 use crate::{
     log_error,
-    lwip::{self, bindings::*, core::LwipCore, packet_buffer::ZeroCopyPacketBuffer},
+    lwip::{bindings::*, packet_buffer::PacketBuffer},
 };
 
-#[derive(Debug)]
-pub struct InThreadTcpProtocolControlBlock {
+pub trait Mode {}
+
+pub struct InThread;
+impl Mode for InThread {}
+
+pub struct OutThread;
+impl Mode for OutThread {}
+
+pub struct TcpProtocolControlBlock<T: Mode> {
     inner: *mut lwip_pcb,
+    _mode: T,
 }
 
-#[derive(Debug)]
-pub struct OutThreadTcpProtocolControlBlock {
-    inner: InThreadTcpProtocolControlBlock,
-}
-
-impl TryFrom<*mut lwip_pcb> for InThreadTcpProtocolControlBlock {
+impl TryFrom<*mut lwip_pcb> for TcpProtocolControlBlock<InThread> {
     type Error = ();
     fn try_from(value: *mut lwip_pcb) -> Result<Self, ()> {
         if value.is_null() {
             Err(())
         } else {
-            Ok(Self { inner: value })
+            Ok(Self {
+                inner: value,
+                _mode: InThread,
+            })
         }
     }
 }
 
-impl TryFrom<*mut lwip_pcb> for OutThreadTcpProtocolControlBlock {
+impl TryFrom<*mut lwip_pcb> for TcpProtocolControlBlock<OutThread> {
     type Error = ();
     fn try_from(value: *mut lwip_pcb) -> Result<Self, ()> {
         if value.is_null() {
             Err(())
         } else {
-            let inner = InThreadTcpProtocolControlBlock::try_from(value)?;
-            Ok(Self { inner })
+            Ok(Self {
+                inner: value,
+                _mode: OutThread,
+            })
         }
     }
 }
 
-impl From<InThreadTcpProtocolControlBlock> for OutThreadTcpProtocolControlBlock {
-    fn from(value: InThreadTcpProtocolControlBlock) -> Self {
-        OutThreadTcpProtocolControlBlock { inner: value }
+impl From<TcpProtocolControlBlock<InThread>> for TcpProtocolControlBlock<OutThread> {
+    fn from(value: TcpProtocolControlBlock<InThread>) -> Self {
+        TcpProtocolControlBlock {
+            inner: value.inner,
+            _mode: OutThread,
+        }
     }
 }
 
-impl OutThreadTcpProtocolControlBlock {
-    pub fn new(_core: &LwipCore) -> Result<Self, ()> {
-        let pcb = unsafe { tcp_new() };
-        Self::try_from(pcb)
-    }
-
-    pub fn as_mut_ptr(&self) -> *mut lwip_pcb {
-        self.inner.as_mut_ptr()
-    }
-
-    pub fn arg(&self, arg: *mut c_void, _core: &LwipCore) {
-        self.inner.arg(arg)
-    }
-
-    pub fn recv(&self, callback: Option<TcpRecvFn>, _core: &LwipCore) {
-        self.inner.recv(callback)
-    }
-
-    pub fn err(&self, callback: Option<LwipErrFn>, _core: &LwipCore) {
-        self.inner.err(callback)
-    }
-
-    pub fn close(&self, _core: &LwipCore) -> Result<(), LwipError> {
-        self.inner.close()
-    }
-
-    #[allow(unused)]
-    pub fn recved(&self, len: u16, _core: &LwipCore) {
-        self.inner.recved(len)
-    }
-
-    pub fn write(&self, slice: &[u8], _core: &LwipCore) -> Result<(), LwipError> {
-        self.inner.write(slice)
-    }
-
-    pub fn output(&self, _core: &LwipCore) -> Result<(), LwipError> {
-        self.inner.output()
-    }
-
-    pub fn bind(&self, port: u16, _core: &LwipCore) -> Result<(), LwipError> {
-        self.inner.bind(port)
-    }
-
-    pub fn accept(&self, callback: Option<TcpAcceptFn>, _core: &LwipCore) {
-        self.inner.accept(callback)
-    }
-
-    pub fn listen_with_backlog(&self, backlog: u8, _core: &LwipCore) -> Result<Self, ()> {
-        let inner = self.inner.listen_with_backlog(backlog)?;
-        Ok(Self { inner })
-    }
-
-    pub fn sent(&self, callback: Option<TcpSentFn>, _core: &LwipCore) {
-        self.inner.sent(callback);
-    }
-}
-
-impl InThreadTcpProtocolControlBlock {
+impl<T: Mode> TcpProtocolControlBlock<T> {
     pub fn as_mut_ptr(&self) -> *mut lwip_pcb {
         self.inner
     }
+}
 
+impl TcpProtocolControlBlock<InThread> {
     pub fn arg(&self, arg: *mut c_void) {
         unsafe { tcp_arg(self.as_mut_ptr(), arg) };
     }
@@ -168,18 +124,40 @@ impl InThreadTcpProtocolControlBlock {
     }
 }
 
+impl TcpProtocolControlBlock<OutThread> {
+    pub fn new() -> Result<Self, ()> {
+        unsafe { sys_mutex_lock(&raw mut lock_tcpip_core) };
+        let pcb = unsafe { tcp_new() };
+        unsafe { sys_mutex_unlock(&raw mut lock_tcpip_core) };
+        Self::try_from(pcb)
+    }
+
+    pub fn with_core<R>(
+        &mut self,
+        fcn: impl FnOnce(&mut TcpProtocolControlBlock<InThread>) -> R,
+    ) -> R {
+        let pcb = unsafe { &mut *(self as *mut Self as *mut TcpProtocolControlBlock<InThread>) };
+        unsafe { sys_mutex_lock(&raw mut lock_tcpip_core) };
+        let res = fcn(pcb);
+        unsafe { sys_mutex_unlock(&raw mut lock_tcpip_core) };
+        res
+    }
+}
+
 pub type TcpHandler = embassy_sync::channel::Channel<ThreadModeRawMutex, Box<TcpHandle>, 3>;
 
 pub struct TcpHandle {
-    pub packets:
-        embassy_sync::channel::Channel<ThreadModeRawMutex, Option<ZeroCopyPacketBuffer>, 10>,
-    pcb: OutThreadTcpProtocolControlBlock,
+    pub packets: embassy_sync::channel::Channel<ThreadModeRawMutex, Option<PacketBuffer>, 10>,
+    pub pcb: TcpProtocolControlBlock<OutThread>,
     closed: bool,
 }
 
 impl TcpHandle {
-    pub fn new(pcb: InThreadTcpProtocolControlBlock) -> Self {
-        let pcb = OutThreadTcpProtocolControlBlock::from(pcb);
+    pub fn new(pcb: TcpProtocolControlBlock<InThread>) -> Self {
+        let pcb = TcpProtocolControlBlock {
+            inner: pcb.inner,
+            _mode: OutThread,
+        };
         Self {
             packets: Channel::new(),
             pcb,
@@ -187,20 +165,16 @@ impl TcpHandle {
         }
     }
 
-    pub fn recv_arg(&mut self, arg: *mut c_void) {
-        self.pcb.inner.arg(arg);
-    }
-
     pub fn close(&mut self) {
-        lwip::core::with_lwip_core(|core| {
-            self.pcb.recv(None, &core);
-            self.pcb.err(None, &core);
-            self.pcb.sent(None, &core);
-            self.pcb.accept(None, &core);
-            if let Err(e) = self.pcb.output(&core) {
+        self.pcb.with_core(|pcb| {
+            pcb.recv(None);
+            pcb.err(None);
+            pcb.sent(None);
+            pcb.accept(None);
+            if let Err(e) = pcb.output() {
                 log_error!("handler.close(): {e:?}");
             }
-            if let Err(e) = self.pcb.close(&core) {
+            if let Err(e) = pcb.close() {
                 log_error!("handler.close(): {e:?}");
             }
         });
@@ -212,13 +186,17 @@ impl TcpHandle {
     pub fn respond(&mut self, bytes: &[u8]) {
         // Can only send once. Ignore repeated calls.
         if !self.closed {
-            lwip::core::with_lwip_core(|core| {
-                if let Err(e) = self.pcb.write(bytes, &core) {
+            self.pcb.with_core(|pcb| {
+                if let Err(e) = pcb.write(bytes) {
                     log_error!("handler.send_response(): {e:?}");
                 }
             });
             self.close();
         }
+    }
+
+    pub unsafe fn recv_arg(&mut self, arg: *mut c_void) {
+        unsafe { tcp_arg(self.pcb.inner, arg) };
     }
 }
 

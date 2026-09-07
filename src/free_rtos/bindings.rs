@@ -5,19 +5,24 @@ pub type RtosTask = c_void;
 pub type RtosTaskParams = c_void;
 pub type TaskFn = unsafe extern "C" fn(*mut RtosTaskParams) -> !;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[repr(i32)]
-#[allow(unused)]
 pub enum FreeRtosError {
+    #[error("Insufficient Heap Memory.")]
     InsufficientHeapMemory = -1,
+    #[error("Generic Failure.")]
     GenericFailure = 0,
+    #[error("Unknown")]
     Unknown = -99,
+    #[error("OK")]
     Ok = 1,
 }
 
 unsafe extern "C" {
+    /// Delete a FreeRTOS task.
     pub fn vTaskDelete(task: *mut RtosTask);
 
+    /// Notify a task to make progress outside of an interrupt.
     pub fn xTaskGenericNotify(
         task: *mut RtosTask,
         index: u32, // index to notify (usually 0)
@@ -26,6 +31,7 @@ unsafe extern "C" {
         previous_notification: *mut u32,
     ) -> i32;
 
+    /// Notify a task to make progress when in an interrupt context.
     pub fn xTaskGenericNotifyFromISR(
         task: *mut c_void,
         index: u32,
@@ -35,14 +41,17 @@ unsafe extern "C" {
         pxHigherPriorityTaskWoken: *mut i32,
     ) -> i32;
 
+    /// Wait a specified time or notification to make progress.
     pub fn ulTaskGenericNotifyTake(
         ux_index_to_wait_on: usize,
         x_clear_count_on_exit: i32,
         xTicksToWait: u32,
     ) -> u32;
 
-    pub fn xTaskGetCurrentTaskHandle() -> *mut c_void;
+    /// Get a pointer to the current task.
+    pub fn xTaskGetCurrentTaskHandle() -> *mut RtosTask;
 
+    /// Create a new FreeRTOS task.
     pub fn xTaskCreate(
         // Pointer to your extern "C" Rust function
         px_task_code: TaskFn,
@@ -58,14 +67,21 @@ unsafe extern "C" {
         px_created_task: *mut RtosTask,
     ) -> FreeRtosError;
 
+    /// Delay a task.
     pub fn vTaskDelay(ticks: u32);
 
+    /// Alloc some FreeRTOS managed heap memory.
     pub fn pvPortMalloc(size: usize) -> *mut u8;
 
+    /// Free some FreeRTOS managed heap memory.
     pub fn vPortFree(ptr: *mut u8);
 
+    /// Get the current time in ticks.
     pub fn xTaskGetTickCount() -> u32;
 
+    /// Enter a critical section.
     pub fn vPortEnterCritical();
+
+    /// Exit a critical section.
     pub fn vPortExitCritical();
 }

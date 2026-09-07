@@ -1,20 +1,36 @@
 use alloc::boxed::Box;
 use embassy_executor::Spawner;
+use embassy_time::Timer;
+use embedded_io::{Read as _, Write as _};
 
 use crate::{
-    fs::{File, FileMode},
+    fs::{File, ReadBytes, WriteBytes},
     http::*,
     log_error, log_info,
-    lwip::tcp::{TcpHandle, TcpHandler},
+    lwip::{
+        UDP_PORT,
+        packet_buffer::PacketBuffer,
+        tcp::{TcpHandle, TcpHandler},
+        udp::UdpSocket,
+    },
+    tasks::{
+        messages::{Chunk, NetworkMessage},
+        rng::generate_uuid_v7,
+        udp::{ADDRESS_BOOK, LEDGER, make_path},
+    },
 };
 
 #[embassy_executor::task(pool_size = 1)]
-pub async fn tcp_handler_task(handler: &'static TcpHandler, spawner: Spawner) {
+pub async fn tcp_handler_task(
+    handler: &'static TcpHandler,
+    udp: &'static UdpSocket,
+    spawner: Spawner,
+) {
     log_info!("TCP handler task started");
     loop {
         let new_handle = handler.receive().await;
         log_info!("Received new handle");
-        match tcp_handle_task(new_handle) {
+        match tcp_handle_task(new_handle, udp) {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),
         }
@@ -22,7 +38,7 @@ pub async fn tcp_handler_task(handler: &'static TcpHandler, spawner: Spawner) {
 }
 
 #[embassy_executor::task(pool_size = 2)]
-pub async fn tcp_handle_task(mut handle: Box<TcpHandle>) {
+pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket) {
     log_info!("New Task");
     let Some(pbuf) = handle.packets.receive().await else {
         log_error!("Handle Closed");
@@ -30,7 +46,7 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>) {
         return;
     };
 
-    let mut iter = pbuf.iter();
+    let mut iter = pbuf.into_iter();
 
     let Some(chunk) = iter.next() else {
         handle.respond(BAD_REQUEST.as_bytes());
@@ -62,7 +78,10 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>) {
                 return;
             };
 
-            let Ok(f) = File::open(c"/usb/rust.gcode", FileMode::Write) else {
+            let guid = generate_uuid_v7();
+            let path = make_path(&guid);
+
+            let Ok(mut f) = File::open(path.as_c_str(), WriteBytes) else {
                 handle.respond(INTERNAL_SERVER_ERROR.as_bytes());
                 return;
             };
@@ -91,9 +110,10 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>) {
                     let Some(pbuf) = handle.packets.receive().await else {
                         log_error!("Handle Reset");
                         handle.close();
+                        File::<ReadBytes>::delete(&path);
                         return;
                     };
-                    for chunk in pbuf.iter() {
+                    for chunk in pbuf.into_iter() {
                         log_info!("Chunk Length: {}", chunk.len());
                         let to_write = core::cmp::min(content_length, chunk.len());
                         let _ = f.write(&chunk[..to_write]);
@@ -108,6 +128,64 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>) {
             f.close();
             handle.respond(OK.as_bytes());
             // dry_print();
+
+            // Append to the ledger or send our new job request...
+            // Communicate the new job across the network
+            // Send the msg 5 times just in case of drop outs.
+            // Can I zero copy and re-use a pbuf?
+            if let Some(ledger) = LEDGER.lock().await.borrow_mut().as_mut() {
+                log_info!("I own the ledger. Adding the file");
+                let _ = ledger.jobs.insert(guid);
+            } else {
+                // OPTMISATION: If there are other machines to send to
+                if !ADDRESS_BOOK.lock().await.borrow().is_empty() {
+                    let msg = NetworkMessage::new_job(guid);
+                    for _i in 0..5 {
+                        if let Some(pbuf) = PacketBuffer::alloc(&msg) {
+                            if udp.broadcast(pbuf, UDP_PORT).is_err() {
+                                log_error!("Broadcasting job failed.");
+                            } else {
+                                log_info!("Job message sent");
+                            }
+                        }
+                        Timer::after_millis(200).await;
+                    }
+                }
+            }
+
+            // Now open, read and send the file chunks to propogate
+            // it through the network. Only if there are machines
+            // to broadcast to.
+            if !ADDRESS_BOOK.lock().await.borrow().is_empty() {
+                let mut n: usize = 0;
+                let mut len: usize = usize::MAX;
+                if let Ok(mut f) = File::open(&path, ReadBytes) {
+                    n += 1;
+                    let mut bytes = [0u8; 768];
+                    while len != 0 {
+                        log_info!("Sending: {n}");
+                        if let Ok(l) = f.read(&mut bytes) {
+                            len = l;
+                            let msg = Chunk {
+                                guid,
+                                chunk_id: n as u16,
+                                last_chunk: len == 0,
+                                len: len as u16,
+                                chunk: bytes,
+                            };
+                            // Send a repeated set of messages
+                            for _i in 0..5 {
+                                if let Some(pbuf) = PacketBuffer::alloc(&msg)
+                                    && udp.broadcast(pbuf, UDP_PORT).is_err()
+                                {
+                                    log_error!("Broadcasting job chunk failed.");
+                                }
+                                Timer::after_millis(200).await;
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

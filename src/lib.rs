@@ -22,7 +22,7 @@ use crate::{
     marlin::{is_ready, set_offline},
     tasks::{
         tcp::tcp_handler_task,
-        udp::{heartbeat, udp_receiver},
+        udp::{address_book_lifetime_check, heartbeat, manage_ledger, udp_receiver},
     },
 };
 
@@ -37,6 +37,8 @@ mod marlin;
 mod panic;
 mod tasks;
 
+/// Define our global allocator for those times we want to make use
+/// of `alloc` and the heap.
 #[global_allocator]
 static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
 
@@ -90,6 +92,8 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
     log_info!("Is Ready: {}", is_ready());
     set_offline();
 
+    // TODO: Clear `.gcode` files from the USB stick if it has old jobs on it.
+
     let udp_sock = init_udp_service();
     let tcp_handler = init_tcp_service();
 
@@ -106,12 +110,20 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
                 Ok(t) => spawner.spawn(t),
                 Err(e) => log_error!("Spawn Error: {e}"),
             }
+            match tcp_handler_task(tcp_handler, udp_sock, spawner) {
+                Ok(t) => spawner.spawn(t),
+                Err(e) => log_error!("Spawn Error: {e}"),
+            }
+            match address_book_lifetime_check() {
+                Ok(t) => spawner.spawn(t),
+                Err(e) => log_error!("Spawn Error: {e}"),
+            }
+            match manage_ledger(udp_sock) {
+                Ok(t) => spawner.spawn(t),
+                Err(e) => log_error!("Spawn Error: {e}"),
+            }
         } else {
             log_error!("No UDP socket");
-        }
-        match tcp_handler_task(tcp_handler, spawner) {
-            Ok(t) => spawner.spawn(t),
-            Err(e) => log_error!("Spawn Error: {e}"),
         }
     })
 }
