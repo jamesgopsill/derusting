@@ -263,6 +263,7 @@ screen_home_data_t::screen_home_data_t()
 
     {
         StringBuilder sb(header_text);
+        /*
 #if SIGNATURE_OAK()
         // #error dead code found by automatic analyses (see BFW-5461)
         sb.append_string("SIGNATURE OAK ");
@@ -279,7 +280,8 @@ screen_home_data_t::screen_home_data_t()
 #endif
 #ifdef _DEBUG
         sb.append_string(" DBG");
-#endif
+#endif */
+        sb.append_string("DERUSTING");
         header.SetText(string_view_utf8::MakeRAM(header_text.data()));
     }
 

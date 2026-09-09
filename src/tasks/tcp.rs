@@ -86,7 +86,7 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
             };
 
             let guid = generate_uuid_v7();
-            let path = make_path(&guid);
+            let path = make_path(&guid, true);
 
             let Ok(mut f) = File::open(path.as_c_str(), WriteBytes) else {
                 handle.respond(INTERNAL_SERVER_ERROR.as_bytes());
@@ -173,15 +173,16 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
                         log_info!("Sending: {n}");
                         if let Ok(l) = f.read(&mut bytes) {
                             len = l;
-                            let msg = Chunk {
+                            let chunk = Chunk {
                                 guid,
                                 chunk_id: n as u16,
                                 last_chunk: len == 0,
                                 len: len as u16,
                                 chunk: bytes,
                             };
+                            let msg = NetworkMessage::Chunk(chunk);
                             // Send a repeated set of messages
-                            for _i in 0..5 {
+                            for _i in 0..3 {
                                 if let Some(pbuf) = PacketBuffer::alloc(&msg)
                                     && udp.broadcast(pbuf, UDP_PORT).is_err()
                                 {

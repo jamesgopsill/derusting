@@ -51,7 +51,7 @@ cd ./buddy || {
 }
 
 # python utils/build.py --preset mini --build-type release --bootloader no
-python utils/build.py --preset mini --build-type release --bootloader no \
+python utils/build.py --preset mini --build-type release --bootloader yes \
   -DWUI:STRING=YES \
   -DBUDDY_ENABLE_WUI:BOOL=YES \
   -DCONNECT:STRING=NO \

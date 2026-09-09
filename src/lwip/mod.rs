@@ -23,7 +23,7 @@ pub mod tcp;
 pub mod udp;
 
 // Static handles for our UDP Service.
-pub const UDP_PORT: u16 = 9000;
+pub const UDP_PORT: u16 = 9090;
 pub static UDP_SOCKET: StaticCell<UdpSocket> = StaticCell::new();
 
 /// Initialise the UDP service.

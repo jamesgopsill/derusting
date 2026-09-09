@@ -26,7 +26,7 @@ pub struct Chunk {
     pub chunk: [u8; 768],
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Ledger {
     pub owner: Ipv4Addr,
     pub jobs: FnvIndexSet<Uuid, 16>,

@@ -36,6 +36,10 @@ unsafe extern "C" {
 
     /// Delete a file
     fn unlink(path: *const c_char) -> c_int;
+
+    /// Renames or moves a file.
+    /// Returns 0 on success, or a non-zero value / -1 on failure.
+    fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int;
 }
 
 /// A trait the produces the necesary flags for `fopen`
@@ -107,6 +111,10 @@ impl<T: Mode> File<T> {
 
     pub fn delete(path: &CStr) -> c_int {
         unsafe { unlink(path.as_ptr()) }
+    }
+
+    pub fn rename(old_path: &CStr, new_path: &CStr) -> c_int {
+        unsafe { rename(old_path.as_ptr(), new_path.as_ptr()) }
     }
 }
 
