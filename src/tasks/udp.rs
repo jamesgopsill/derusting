@@ -26,7 +26,11 @@ pub static LEDGER: StaticLedger = Mutex::new(RefCell::new(None));
 #[embassy_executor::task(pool_size = 1)]
 pub async fn heartbeat(sock: &'static UdpSocket) {
     loop {
-        log_info!("[{:?}] heartbeat()", my_ipaddr());
+        if let Some(addr) = my_ipaddr() {
+            log_info!("[{:?}] heartbeat()", addr);
+        } else {
+            log_info!("[Unknown] heartbeat()");
+        }
         let has_ledger = LEDGER.lock().await.borrow().is_some();
         if let Some(pbuf) = PacketBuffer::alloc(NetworkMessage::heartbeat(has_ledger))
             && sock.broadcast(pbuf, UDP_PORT).is_err()
@@ -230,6 +234,7 @@ pub async fn manage_ledger(sock: &'static UdpSocket) -> ! {
         }
 
         if let Some(mut l) = ledger.take() {
+            log_info!("{:?}", l);
             if is_ready() && is_idle() {
                 log_info!("Available for Jobs");
                 // 1. Am I free to take on a job and is there a job in the

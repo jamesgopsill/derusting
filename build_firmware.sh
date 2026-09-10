@@ -1,3 +1,18 @@
+if [ -z "$1" ]; then
+  echo "Usage: $0 --bootloader [yes|no]"
+  exit 1
+fi
+
+if [ -z "$2" ]; then
+  echo "Usage: $0 --bootloader [yes|no]"
+  exit 1
+fi
+
+if [[ "$2" != "yes" && "$2" != "no" ]]; then
+  echo "Usage: $0 --bootloader [yes|no]"
+  exit 1
+fi
+
 cargo build --release || {
   echo "Cargo Build Failed"
   exit 1
@@ -50,13 +65,23 @@ cd ./buddy || {
   echo "Failed to find buddy dir"
 }
 
-# python utils/build.py --preset mini --build-type release --bootloader no
-python utils/build.py --preset mini --build-type release --bootloader yes \
-  -DWUI:STRING=YES \
-  -DBUDDY_ENABLE_WUI:BOOL=YES \
-  -DCONNECT:STRING=NO \
-  -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
-  -DHAS_NFC:BOOL=OFF
+if [[ "$2" == "yes" ]]; then {
+  python utils/build.py --preset mini --build-type release --bootloader yes \
+    -DWUI:STRING=YES \
+    -DBUDDY_ENABLE_WUI:BOOL=YES \
+    -DCONNECT:STRING=NO \
+    -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
+    -DHAS_NFC:BOOL=OFF
+}; else
+  {
+    python utils/build.py --preset mini --build-type release --bootloader no \
+      -DWUI:STRING=YES \
+      -DBUDDY_ENABLE_WUI:BOOL=YES \
+      -DCONNECT:STRING=NO \
+      -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
+      -DHAS_NFC:BOOL=OFF
+  }
+fi
 
 cd ..
 
