@@ -1,4 +1,4 @@
-name: Workflow Dispatch Release with RC option.
+name: New Release
 
 on:
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v7
         with:
-          python-version: '3.14'
+          python-version: '3.11'
           cache: 'pip'
 
       - name: Install Python Dependencies
