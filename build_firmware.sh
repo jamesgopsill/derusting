@@ -58,8 +58,8 @@ else
 fi
 
 # UI elements
-rsync -u assets/screen_home.hpp buddy/src/gui/screen_home.hpp
-rsync -u assets/screen_home.cpp buddy/src/gui/screen_home.cpp
+rsync -c assets/screen_home.hpp buddy/src/gui/screen_home.hpp
+rsync -c assets/screen_home.cpp buddy/src/gui/screen_home.cpp
 
 cd ./buddy || {
   echo "Failed to find buddy dir"
