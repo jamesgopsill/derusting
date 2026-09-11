@@ -15,7 +15,7 @@ on:
       release_type:
         description: 'Release candidate?'
         required: true
-        default: 'stable'
+        default: 'dry_run'
         type: choice
         options:
           - stable
@@ -53,7 +53,7 @@ jobs:
           target: thumbv7em-none-eabihf
 
       - name: Build Derusting
-        run: bash build_firmware --bootloader yes
+        run: bash build_firmware.sh --bootloader yes
 
       - name: Increment Version Tag
         env:
