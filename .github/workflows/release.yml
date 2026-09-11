@@ -1,0 +1,69 @@
+name: Workflow Dispatch Release with RC option.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump_type:
+        description: 'SemVer Bump:'
+        required: true
+        default: 'patch'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      release_type:
+        description: 'Release candidate?'
+        required: true
+        default: 'stable'
+        type: choice
+        options:
+          - stable
+          - rc
+          - dry_run
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+          cache: 'pip'
+
+      - name: Install Python Dependencies
+        run: pip install -r buddy/requirements.txt
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          components: rust-src, rustfmt
+          target: thumbv7em-none-eabihf
+
+      - name: Build Derusting
+        run: bash build_firmware --bootloader yes
+
+      - name: Increment Version Tag
+        env:
+          BUMP_TYPE: ${{ github.event.inputs.bump_type }}
+          RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+        run: python .github/scripts/increment_version.py
+
+      - name: Create GitHub Release and Upload Assets
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: python .github/scripts/create_release.py
