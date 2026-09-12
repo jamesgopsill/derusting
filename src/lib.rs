@@ -7,7 +7,6 @@ use core::{
 
 use critical_section::Mutex;
 use embassy_futures::join::{join, join5};
-use embassy_sync::channel::Channel;
 use embassy_time_queue_utils::Queue;
 use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
 use static_cell::StaticCell;
@@ -20,7 +19,7 @@ use crate::{
         task::Task,
         time_driver::FreeRtosTimeDriver,
     },
-    lwip::{tcp::TcpListener, udp::UdpSock},
+    lwip::{tcp::TcpListener, udp::UdpSocket},
     marlin::{is_ready, set_offline},
     tasks::{
         tcp::tcp_worker,
@@ -111,8 +110,7 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
 
 #[embassy_executor::task(pool_size = 1)]
 async fn embassy_main() {
-    let udp_channel = Channel::<_, _, 8>::new();
-    let udp = UdpSock::new(udp_channel.sender());
+    let udp = UdpSocket::<6>::new();
     let mut udp = core::pin::pin!(udp);
     if udp.as_mut().listen(UDP_PORT).is_err() {
         log_critical!("UDP failed");
@@ -120,8 +118,7 @@ async fn embassy_main() {
     };
     log_info!("UDP up on {UDP_PORT}");
 
-    let tcp_channel = Channel::<_, _, 2>::new();
-    let tcp = TcpListener::<'_, 2, 8>::new(tcp_channel.sender());
+    let tcp = TcpListener::<2, 8>::new();
     let mut tcp = core::pin::pin!(tcp);
     if tcp.as_mut().listen(TCP_PORT).is_err() {
         log_critical!("TCP Failed");
@@ -129,12 +126,12 @@ async fn embassy_main() {
     };
     log_info!("TCP up on {TCP_PORT}");
 
-    let fut_01 = heartbeat(&udp);
+    let fut_01 = heartbeat(udp.as_ref());
     let fut_02 = address_book_lifetime_check();
-    let fut_03 = udp_receiver(udp_channel.receiver());
-    let fut_04 = manage_ledger(&udp);
-    let fut_05 = tcp_worker(tcp_channel.receiver(), &udp);
-    let fut_06 = tcp_worker(tcp_channel.receiver(), &udp);
+    let fut_03 = udp_receiver(udp.as_ref());
+    let fut_04 = manage_ledger(udp.as_ref());
+    let fut_05 = tcp_worker(tcp.as_ref(), udp.as_ref());
+    let fut_06 = tcp_worker(tcp.as_ref(), udp.as_ref());
     let fut = join5(fut_01, fut_02, fut_03, fut_04, fut_05);
     let fut = join(fut, fut_06);
     fut.await;

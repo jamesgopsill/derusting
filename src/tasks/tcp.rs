@@ -1,6 +1,5 @@
 use core::pin::Pin;
 
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Receiver};
 use embassy_time::Timer;
 use embedded_io::{Read as _, Write as _};
 
@@ -8,7 +7,11 @@ use crate::{
     fs::{self, ReadBytes, WriteBytes},
     http::{BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK},
     log_error, log_info,
-    lwip::{bindings::lwip_pcb, packet_buffer::PacketBuffer, tcp::TcpConn, udp::UdpSock},
+    lwip::{
+        packet_buffer::PacketBuffer,
+        tcp::{TcpConnection, TcpListener},
+        udp::UdpSocket,
+    },
     tasks::{
         messages::{Chunk, NetworkMessage},
         rng::generate_uuid_v7,
@@ -18,23 +21,23 @@ use crate::{
 
 /// This task receives new tcp handlers and spawns
 /// tasks to manage each one.
-pub async fn tcp_worker<'a>(
-    receiver: Receiver<'a, ThreadModeRawMutex, *mut lwip_pcb, 2>,
-    sock: &'a UdpSock<'a, 8>,
+pub async fn tcp_worker<const N: usize, const M: usize, const O: usize>(
+    tcp: Pin<&TcpListener<N, M>>,
+    udp: Pin<&UdpSocket<O>>,
 ) {
     loop {
-        let pcb = receiver.receive().await;
-        let conn = TcpConn::<8>::new(pcb);
-        let mut conn = core::pin::pin!(conn);
-        conn.as_mut().attach_callbacks();
-        handle_conn(conn.as_mut(), sock).await;
-        // conn will close here
+        tcp.as_ref()
+            .with_connection(async |conn| handle_conn(conn, udp.as_ref()).await)
+            .await;
     }
 }
 
 /// A task that handles TCP requests for the printer. There is only `GET /` and `PUT /` to
 /// retrieve the submission and put files onto the network for processing.
-pub async fn handle_conn<'a>(conn: Pin<&mut TcpConn<8>>, udp: &'a UdpSock<'a, 8>) {
+pub async fn handle_conn<const N: usize, const M: usize>(
+    conn: Pin<&mut TcpConnection<N>>,
+    udp: Pin<&UdpSocket<M>>,
+) {
     log_info!("New Task");
     let Some(pbuf) = conn.as_ref().receive().await else {
         log_error!("Handle Closed");

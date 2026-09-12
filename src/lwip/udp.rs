@@ -1,20 +1,20 @@
 use core::{ffi::c_void, marker::PhantomPinned, net::Ipv4Addr, pin::Pin};
 
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Sender};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 
 use crate::lwip::{bindings::*, packet_buffer::PacketBuffer};
 
-pub struct UdpSock<'a, const N: usize> {
+pub struct UdpSocket<const N: usize> {
     pcb: *mut lwip_pcb,
-    sender: Sender<'a, ThreadModeRawMutex, (Ipv4Addr, PacketBuffer), N>,
+    channel: Channel<ThreadModeRawMutex, (Ipv4Addr, PacketBuffer), N>,
     _pin: PhantomPinned,
 }
 
-impl<'a, const N: usize> UdpSock<'a, N> {
-    pub fn new(sender: Sender<'a, ThreadModeRawMutex, (Ipv4Addr, PacketBuffer), N>) -> Self {
+impl<const N: usize> UdpSocket<N> {
+    pub fn new() -> Self {
         Self {
             pcb: core::ptr::null_mut(),
-            sender,
+            channel: Channel::new(),
             _pin: PhantomPinned,
         }
     }
@@ -38,7 +38,7 @@ impl<'a, const N: usize> UdpSock<'a, N> {
         }
     }
 
-    pub fn broadcast(&self, mut pbuf: PacketBuffer, port: u16) -> Result<(), LwipError> {
+    pub fn broadcast(self: Pin<&Self>, mut pbuf: PacketBuffer, port: u16) -> Result<(), LwipError> {
         if self.pcb.is_null() {
             return Err(LwipError::Arg);
         }
@@ -49,6 +49,14 @@ impl<'a, const N: usize> UdpSock<'a, N> {
             sys_mutex_unlock(&raw mut lock_tcpip_core);
             err.into()
         }
+    }
+
+    pub async fn with_packet<F>(self: Pin<&Self>, fcn: F)
+    where
+        F: AsyncFnOnce((Ipv4Addr, PacketBuffer)),
+    {
+        let packet = self.channel.receive().await;
+        fcn(packet).await;
     }
 
     unsafe extern "C" fn recv(
@@ -62,7 +70,7 @@ impl<'a, const N: usize> UdpSock<'a, N> {
             return;
         }
 
-        let sock = unsafe { &*(arg as *const UdpSock<'a, N>) };
+        let sock = unsafe { &*(arg as *const UdpSocket<N>) };
 
         let Ok(pb) = PacketBuffer::try_from(pbuf) else {
             return;
@@ -71,13 +79,13 @@ impl<'a, const N: usize> UdpSock<'a, N> {
         // Lwip - network byte order Big-Endian. Host ARM expecting Little-Endian.
         let addr = unsafe { Ipv4Addr::from_bits(u32::from_be((*addr).addr)) };
 
-        let _ = sock.sender.try_send((addr, pb));
+        let _ = sock.channel.try_send((addr, pb));
         // If we fail to send the PacketBuffer then it
         // will free itself when dropped
     }
 }
 
-impl<'a, const N: usize> Drop for UdpSock<'a, N> {
+impl<const N: usize> Drop for UdpSocket<N> {
     fn drop(&mut self) {
         unsafe {
             sys_mutex_lock(&raw mut lock_tcpip_core);

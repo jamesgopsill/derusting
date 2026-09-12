@@ -1,31 +1,37 @@
 use core::{ffi::c_void, marker::PhantomPinned, pin::Pin};
 
-use embassy_sync::{
-    blocking_mutex::raw::ThreadModeRawMutex,
-    channel::{Channel, Sender},
-};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
 
 use crate::{
     log_error, log_info,
     lwip::{bindings::*, packet_buffer::PacketBuffer},
 };
 
-pub struct TcpListener<'a, const N: usize, const M: usize> {
+/// Accepts new TCP connections through LWIP.
+pub struct TcpListener<const N: usize, const M: usize> {
     pcb: *mut lwip_pcb,
-    sender: Sender<'a, ThreadModeRawMutex, *mut lwip_pcb, N>,
+    channel: Channel<ThreadModeRawMutex, *mut lwip_pcb, N>,
     _pin: PhantomPinned,
 }
 
-impl<'a, const N: usize, const M: usize> TcpListener<'a, N, M> {
-    pub fn new(sender: Sender<'a, ThreadModeRawMutex, *mut lwip_pcb, N>) -> Self {
+impl<const N: usize, const M: usize> TcpListener<N, M> {
+    /// Create a new instance with a sender that passes `*mut lwip_pcb` when
+    /// accepting a new connection.
+    pub fn new() -> Self {
         Self {
             pcb: core::ptr::null_mut(),
-            sender,
+            channel: Channel::new(),
             _pin: PhantomPinned,
         }
     }
 
+    /// The listener must be pinned before it can accept new request to ensure
+    /// that the LWIP callbacks ptrs to the struct remain valid.
     pub fn listen(self: Pin<&mut Self>, port: u16) -> Result<(), ()> {
+        // # Safety
+        // We satisfy the contract by ensuring that we do not move data
+        // from within the `Pin` and we lock the LWIP thread so we can
+        // call LWIP function out-of-thread.
         unsafe {
             let this = self.get_unchecked_mut();
             sys_mutex_lock(&raw mut lock_tcpip_core);
@@ -47,7 +53,9 @@ impl<'a, const N: usize, const M: usize> TcpListener<'a, N, M> {
         }
     }
 
-    pub unsafe extern "C" fn _accept(
+    /// An internal function to handle LWIP callback when accepting
+    /// a new function.
+    unsafe extern "C" fn _accept(
         arg: *mut c_void,
         pcb: *mut lwip_pcb,
         err: LwipError,
@@ -67,17 +75,31 @@ impl<'a, const N: usize, const M: usize> TcpListener<'a, N, M> {
             return LwipError::Ok;
         }
 
-        let listener = unsafe { &*(arg as *const TcpListener<'a, N, M>) };
+        // # Safety
+        // We ensure the listener is set as an arg before the callback
+        // is called.
+        let listener = unsafe { &*(arg as *const TcpListener<N, M>) };
 
-        if listener.sender.try_send(pcb).is_err() {
+        if listener.channel.try_send(pcb).is_err() {
             log_error!("TCP Listener Channel Full");
         };
 
         LwipError::Ok
     }
+
+    pub async fn with_connection<F>(self: Pin<&Self>, fcn: F)
+    where
+        F: AsyncFnOnce(Pin<&mut TcpConnection<M>>),
+    {
+        let pcb = self.channel.receive().await;
+        let conn = TcpConnection::<M>::new(pcb);
+        let mut conn = core::pin::pin!(conn);
+        conn.as_mut().attach_callbacks();
+        fcn(conn).await;
+    }
 }
 
-impl<'a, const N: usize, const M: usize> Drop for TcpListener<'a, N, M> {
+impl<'a, const N: usize, const M: usize> Drop for TcpListener<N, M> {
     fn drop(&mut self) {
         unsafe {
             sys_mutex_lock(&raw mut lock_tcpip_core);
@@ -87,7 +109,7 @@ impl<'a, const N: usize, const M: usize> Drop for TcpListener<'a, N, M> {
             if err != LwipError::Ok {
                 log_error!("tcp_close: {err:?}");
             }
-            self.sender.clear();
+            self.channel.clear();
             sys_mutex_unlock(&raw mut lock_tcpip_core);
         }
     }
@@ -97,13 +119,14 @@ impl<'a, const N: usize, const M: usize> Drop for TcpListener<'a, N, M> {
 // and pin construct the TcpConn on receipt for the channel
 // to prevent it moving on the stack.
 
-pub struct TcpConn<const N: usize> {
+pub struct TcpConnection<const N: usize> {
     pcb: *mut lwip_pcb,
     channel: Channel<ThreadModeRawMutex, Option<PacketBuffer>, N>,
     _pin: PhantomPinned,
 }
 
-impl<const N: usize> TcpConn<N> {
+impl<const N: usize> TcpConnection<N> {
+    /// Create a new instance of TcpConnection
     pub fn new(pcb: *mut lwip_pcb) -> Self {
         Self {
             pcb,
@@ -165,7 +188,7 @@ impl<const N: usize> TcpConn<N> {
         if arg.is_null() {
             return LwipError::Val;
         }
-        let conn = unsafe { &*(arg as *const TcpConn<N>) };
+        let conn = unsafe { &*(arg as *const TcpConnection<N>) };
         let Ok(pb) = PacketBuffer::try_from(pbuf) else {
             let _ = conn.channel.try_send(None);
             return LwipError::Val;
@@ -188,7 +211,7 @@ impl<const N: usize> TcpConn<N> {
         log_info!("_err()");
         if !arg.is_null() {
             log_error!("on_tcp_err");
-            let conn = unsafe { &*(arg as *const TcpConn<N>) };
+            let conn = unsafe { &*(arg as *const TcpConnection<N>) };
             let _ = conn.channel.try_send(None);
         }
     }
@@ -199,7 +222,7 @@ impl<const N: usize> TcpConn<N> {
     }
 }
 
-impl<const N: usize> Drop for TcpConn<N> {
+impl<const N: usize> Drop for TcpConnection<N> {
     fn drop(&mut self) {
         log_info!("Dropping TcpConn");
         unsafe {

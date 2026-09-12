@@ -1,7 +1,7 @@
+use core::pin::Pin;
 use core::{cell::RefCell, net::Ipv4Addr};
 
 use alloc::string::ToString as _;
-use embassy_sync::channel::Receiver;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use embedded_io::Write as _;
@@ -12,9 +12,9 @@ use uuid::Uuid;
 use crate::fs::{self, File, ReadBytes, WriteBytes};
 use crate::lwip::my_ipaddr;
 use crate::lwip::packet_buffer::PacketBuffer;
-use crate::lwip::udp::UdpSock;
+use crate::lwip::udp::UdpSocket;
 use crate::tasks::messages::{Chunk, Ledger, NetworkMessage};
-use crate::{log_error, log_info, marlin};
+use crate::{UDP_PORT, log_error, log_info, marlin};
 
 type AddressBook = Mutex<ThreadModeRawMutex, RefCell<LinearMap<Ipv4Addr, Instant, 32>>>;
 type StaticLedger = Mutex<ThreadModeRawMutex, RefCell<Option<Ledger>>>;
@@ -24,7 +24,7 @@ pub static LEDGER: StaticLedger = Mutex::new(RefCell::new(None));
 
 /// This task broadcasts a heartbeat to the network to inform
 /// other machines that this machine is alive and on the network.
-pub async fn heartbeat<'a>(sock: &'a UdpSock<'a, 8>) {
+pub async fn heartbeat<const N: usize>(udp: Pin<&UdpSocket<N>>) {
     loop {
         if let Some(addr) = my_ipaddr() {
             log_info!("[{:?}] heartbeat()", addr);
@@ -33,7 +33,7 @@ pub async fn heartbeat<'a>(sock: &'a UdpSock<'a, 8>) {
         }
         let has_ledger = LEDGER.lock().await.borrow().is_some();
         if let Some(pbuf) = PacketBuffer::alloc(NetworkMessage::heartbeat(has_ledger))
-            && sock.broadcast(pbuf, 9090).is_err()
+            && udp.as_ref().broadcast(pbuf, 9090).is_err()
         {
             log_error!("Broadcast failed.");
         }
@@ -117,76 +117,77 @@ impl TryFrom<Chunk> for FileTransfer {
 
 /// This task will receive and handle messages being sent over UDP
 /// on the network.
-pub async fn udp_receiver<'a>(
-    receiver: Receiver<'a, ThreadModeRawMutex, (Ipv4Addr, PacketBuffer), 8>,
-) {
+pub async fn udp_receiver<const N: usize>(udp: Pin<&UdpSocket<N>>) {
     log_info!("Ready to receive UDP packets");
     let mut file_transfer: Option<FileTransfer> = None;
     loop {
-        let (addr, msg) = receiver.receive().await;
-        if let Some(msg) = msg.into_iter().next() {
-            match postcard::from_bytes::<NetworkMessage>(msg) {
-                Ok(network_msg) => match network_msg {
-                    // We have received a heartbeat from another machine.
-                    // Lets add/update their entry in our address book.
-                    NetworkMessage::Heartbeat(h) => {
-                        log_info!("{}: Heartbeat: alive={}", addr, h.alive);
-                        let lock = ADDRESS_BOOK.lock().await;
-                        let mut book = lock.borrow_mut();
-                        if let Err(e) = book.insert(addr, Instant::now()) {
-                            log_error!("Address book error: {e:?}");
-                        };
-                    }
-                    // We have received a new_job message and the owner of the
-                    // ledger should update the ledger to include the job in
-                    // the list.
-                    NetworkMessage::NewJob(new_job) => {
-                        let lock = LEDGER.lock().await;
-                        let mut ledger = lock.borrow_mut();
-                        if let Some(ledger) = ledger.as_mut() {
-                            let _ = ledger.jobs.insert(new_job.guid);
-                        }
-                    }
-                    // We have received a chunk of a gcode file. We can only process
-                    // one file at a time. We check if we're not already processing
-                    // a file. Check whether the chunk_id is the next one in the list.
-                    // TODO: We need to include the uuid of the job as multiple jobs
-                    // at the same time might interfere with one another.
-                    // NOTE: Future me, improve to handle multiple files at the same.
-                    NetworkMessage::Chunk(chunk) => {
-                        if let Some(ft) = file_transfer.take() {
-                            file_transfer = ft.digest(chunk);
-                        } else {
-                            // No file_transfer present so lets check if the
-                            // chunk_id is 1 and a start of a new file.
-                            if chunk.chunk_id == 1 {
-                                if let Ok(ft) = FileTransfer::try_from(chunk) {
-                                    file_transfer = Some(ft);
-                                }
-                                continue;
+        udp.as_ref()
+            .with_packet(async |(addr, packet)| {
+                if let Some(msg) = packet.into_iter().next() {
+                    match postcard::from_bytes::<NetworkMessage>(msg) {
+                        Ok(network_msg) => match network_msg {
+                            // We have received a heartbeat from another machine.
+                            // Lets add/update their entry in our address book.
+                            NetworkMessage::Heartbeat(h) => {
+                                log_info!("{}: Heartbeat: alive={}", addr, h.alive);
+                                let lock = ADDRESS_BOOK.lock().await;
+                                let mut book = lock.borrow_mut();
+                                if let Err(e) = book.insert(addr, Instant::now()) {
+                                    log_error!("Address book error: {e:?}");
+                                };
                             }
+                            // We have received a new_job message and the owner of the
+                            // ledger should update the ledger to include the job in
+                            // the list.
+                            NetworkMessage::NewJob(new_job) => {
+                                let lock = LEDGER.lock().await;
+                                let mut ledger = lock.borrow_mut();
+                                if let Some(ledger) = ledger.as_mut() {
+                                    let _ = ledger.jobs.insert(new_job.guid);
+                                }
+                            }
+                            // We have received a chunk of a gcode file. We can only process
+                            // one file at a time. We check if we're not already processing
+                            // a file. Check whether the chunk_id is the next one in the list.
+                            // TODO: We need to include the uuid of the job as multiple jobs
+                            // at the same time might interfere with one another.
+                            // NOTE: Future me, improve to handle multiple files at the same.
+                            NetworkMessage::Chunk(chunk) => {
+                                if let Some(ft) = file_transfer.take() {
+                                    file_transfer = ft.digest(chunk);
+                                } else {
+                                    // No file_transfer present so lets check if the
+                                    // chunk_id is 1 and a start of a new file.
+                                    if chunk.chunk_id == 1 {
+                                        if let Ok(ft) = FileTransfer::try_from(chunk) {
+                                            file_transfer = Some(ft);
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                            // We have received a ledger message which occurs when the
+                            // ledger is being exchanged. We check if we're the new
+                            // owner of the ledger and take control. Otherwise we ignore.
+                            NetworkMessage::Ledger(ledger) => {
+                                let guard = LEDGER.lock().await;
+                                let mut rc = guard.borrow_mut();
+                                if let Some(my_addr) = my_ipaddr()
+                                    && ledger.owner == my_addr
+                                    && rc.is_none()
+                                {
+                                    *rc = Some(ledger);
+                                }
+                            }
+                        },
+                        Err(_) => {
+                            // log_error!("Deserialization failed for packet: {:02X?}", msg)
+                            log_error!("Packet Deserialization failed");
                         }
                     }
-                    // We have received a ledger message which occurs when the
-                    // ledger is being exchanged. We check if we're the new
-                    // owner of the ledger and take control. Otherwise we ignore.
-                    NetworkMessage::Ledger(ledger) => {
-                        let guard = LEDGER.lock().await;
-                        let mut rc = guard.borrow_mut();
-                        if let Some(my_addr) = my_ipaddr()
-                            && ledger.owner == my_addr
-                            && rc.is_none()
-                        {
-                            *rc = Some(ledger);
-                        }
-                    }
-                },
-                Err(_) => {
-                    // log_error!("Deserialization failed for packet: {:02X?}", msg)
-                    log_error!("Packet Deserialization failed");
                 }
-            }
-        }
+            })
+            .await;
     }
 }
 
@@ -206,7 +207,7 @@ pub async fn address_book_lifetime_check() {
 
 /// This task manages the token-ring ledger that is passed between
 /// machines. We only do something if we are the owner of the ledger.
-pub async fn manage_ledger<'a>(sock: &'a UdpSock<'a, 8>) -> ! {
+pub async fn manage_ledger<const N: usize>(udp: Pin<&UdpSocket<N>>) -> ! {
     loop {
         // Give all the services time to populate the address book
         // and see who is on the network.
@@ -298,7 +299,7 @@ pub async fn manage_ledger<'a>(sock: &'a UdpSock<'a, 8>) -> ! {
                 for _i in 0..3 {
                     // TODO: Consider passing a reference.
                     if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                        && sock.broadcast(pbuf, 9090).is_err()
+                        && udp.as_ref().broadcast(pbuf, UDP_PORT).is_err()
                     {
                         log_error!("Broadcast failed.");
                     }
