@@ -1,18 +1,14 @@
-use alloc::boxed::Box;
-use embassy_executor::Spawner;
+use core::pin::Pin;
+
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Receiver};
 use embassy_time::Timer;
 use embedded_io::{Read as _, Write as _};
 
 use crate::{
-    fs::{File, ReadBytes, WriteBytes},
-    http::*,
+    fs::{self, ReadBytes, WriteBytes},
+    http::{BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK},
     log_error, log_info,
-    lwip::{
-        UDP_PORT,
-        packet_buffer::PacketBuffer,
-        tcp::{TcpHandle, TcpHandler},
-        udp::UdpSocket,
-    },
+    lwip::{bindings::lwip_pcb, packet_buffer::PacketBuffer, tcp::TcpConn, udp::UdpSock},
     tasks::{
         messages::{Chunk, NetworkMessage},
         rng::generate_uuid_v7,
@@ -22,53 +18,45 @@ use crate::{
 
 /// This task receives new tcp handlers and spawns
 /// tasks to manage each one.
-#[embassy_executor::task(pool_size = 1)]
-pub async fn tcp_handler_task(
-    handler: &'static TcpHandler,
-    udp: &'static UdpSocket,
-    spawner: Spawner,
+pub async fn tcp_worker<'a>(
+    receiver: Receiver<'a, ThreadModeRawMutex, *mut lwip_pcb, 2>,
+    sock: &'a UdpSock<'a, 8>,
 ) {
-    log_info!("TCP handler task started");
     loop {
-        let new_handle = handler.receive().await;
-        log_info!("Received new handle");
-        match tcp_handle_task(new_handle, udp) {
-            Ok(t) => spawner.spawn(t),
-            // TODO: return a service unavailable error but for now
-            // we have more tasks than the permitted number of requests
-            // in the lwip backlog.
-            Err(e) => log_error!("Spawn Error: {e}"),
-        }
+        let pcb = receiver.receive().await;
+        let conn = TcpConn::<8>::new(pcb);
+        let mut conn = core::pin::pin!(conn);
+        conn.as_mut().attach_callbacks();
+        handle_conn(conn.as_mut(), sock).await;
+        // conn will close here
     }
 }
 
 /// A task that handles TCP requests for the printer. There is only `GET /` and `PUT /` to
 /// retrieve the submission and put files onto the network for processing.
-#[embassy_executor::task(pool_size = 2)]
-pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket) {
+pub async fn handle_conn<'a>(conn: Pin<&mut TcpConn<8>>, udp: &'a UdpSock<'a, 8>) {
     log_info!("New Task");
-    let Some(pbuf) = handle.packets.receive().await else {
+    let Some(pbuf) = conn.as_ref().receive().await else {
         log_error!("Handle Closed");
-        handle.close();
         return;
     };
 
     let mut iter = pbuf.into_iter();
 
     let Some(chunk) = iter.next() else {
-        handle.respond(BAD_REQUEST.as_bytes());
+        let _ = conn.response(BAD_REQUEST.as_bytes());
         return;
     };
 
     let Some((start_line, headers, body)) = split_request(chunk) else {
-        handle.respond(BAD_REQUEST.as_bytes());
+        let _ = conn.response(BAD_REQUEST.as_bytes());
         return;
     };
 
     let method = match check_start_line(start_line) {
         Ok(method) => method,
         Err(e) => {
-            handle.respond(e.as_bytes());
+            let _ = conn.response(e.as_bytes());
             return;
         }
     };
@@ -76,20 +64,20 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
     match method {
         Method::Get => {
             log_info!("/ GET request");
-            handle.respond(INDEX_HTML.as_bytes());
+            let _ = conn.response(INDEX_HTML.as_bytes());
         }
         Method::Put => {
             log_info!("/ PUT request");
             let Ok(mut content_length) = check_put_header(headers) else {
-                handle.respond(BAD_REQUEST.as_bytes());
+                let _ = conn.response(BAD_REQUEST.as_bytes());
                 return;
             };
 
             let guid = generate_uuid_v7();
             let path = make_path(&guid, true);
 
-            let Ok(mut f) = File::open(path.as_c_str(), WriteBytes) else {
-                handle.respond(INTERNAL_SERVER_ERROR.as_bytes());
+            let Ok(mut f) = fs::open(path.as_c_str(), WriteBytes) else {
+                let _ = conn.response(INTERNAL_SERVER_ERROR.as_bytes());
                 return;
             };
 
@@ -114,10 +102,9 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
             // Do we need more chains? If so, wait to digest them.
             if more_packets_needed {
                 while content_length > 0 {
-                    let Some(pbuf) = handle.packets.receive().await else {
+                    let Some(pbuf) = conn.as_ref().receive().await else {
                         log_error!("Handle Reset");
-                        handle.close();
-                        File::<ReadBytes>::delete(&path);
+                        fs::delete(&path);
                         return;
                     };
                     for chunk in pbuf.into_iter() {
@@ -133,8 +120,7 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
             }
 
             f.close();
-            handle.respond(OK.as_bytes());
-            // dry_print();
+            let _ = conn.response(OK.as_bytes());
 
             // Append to the ledger or send our new job request...
             // Communicate the new job across the network
@@ -149,7 +135,7 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
                     let msg = NetworkMessage::new_job(guid);
                     for _i in 0..5 {
                         if let Some(pbuf) = PacketBuffer::alloc(&msg) {
-                            if udp.broadcast(pbuf, UDP_PORT).is_err() {
+                            if udp.broadcast(pbuf, 9090).is_err() {
                                 log_error!("Broadcasting job failed.");
                             } else {
                                 log_info!("Job message sent");
@@ -166,7 +152,7 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
             if !ADDRESS_BOOK.lock().await.borrow().is_empty() {
                 let mut n: usize = 0;
                 let mut len: usize = usize::MAX;
-                if let Ok(mut f) = File::open(&path, ReadBytes) {
+                if let Ok(mut f) = fs::open(&path, ReadBytes) {
                     n += 1;
                     let mut bytes = [0u8; 768];
                     while len != 0 {
@@ -184,7 +170,7 @@ pub async fn tcp_handle_task(mut handle: Box<TcpHandle>, udp: &'static UdpSocket
                             // Send a repeated set of messages
                             for _i in 0..3 {
                                 if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                                    && udp.broadcast(pbuf, UDP_PORT).is_err()
+                                    && udp.broadcast(pbuf, 9090).is_err()
                                 {
                                     log_error!("Broadcasting job chunk failed.");
                                 }

@@ -77,6 +77,34 @@ impl Mode for WriteBytes {
 // Read Bytes implements `embedded::io::Write`.
 impl ImplementsEmbeddedIoWrite for WriteBytes {}
 
+/// Open a file in a particular mode.
+pub fn open<T>(path: &CStr, mode: T) -> Result<File<T>, ()>
+where
+    T: Mode,
+{
+    if !path.to_bytes().starts_with(b"/usb/") {
+        log_error!("Path must start with /usb/");
+        return Err(());
+    }
+    let res = unsafe { fopen(path.as_ptr(), mode.as_cstr().as_ptr()) };
+    if res.is_null() {
+        Err(())
+    } else {
+        Ok(File {
+            fp: res,
+            _mode: mode,
+        })
+    }
+}
+
+pub fn delete(path: &CStr) -> c_int {
+    unsafe { unlink(path.as_ptr()) }
+}
+
+pub fn rname(old_path: &CStr, new_path: &CStr) -> c_int {
+    unsafe { rename(old_path.as_ptr(), new_path.as_ptr()) }
+}
+
 /// A Rust safe wrapper around a file.
 pub struct File<T>
 where
@@ -87,35 +115,13 @@ where
 }
 
 /// Functions available across all modes.
-impl<T: Mode> File<T> {
-    /// Open a file in a particular mode.
-    pub fn open(path: &CStr, mode: T) -> Result<Self, ()> {
-        if !path.to_bytes().starts_with(b"/usb/") {
-            log_error!("Path must start with /usb/");
-            return Err(());
-        }
-        let res = unsafe { fopen(path.as_ptr(), mode.as_cstr().as_ptr()) };
-        if res.is_null() {
-            Err(())
-        } else {
-            Ok(Self {
-                fp: res,
-                _mode: mode,
-            })
-        }
-    }
-
+impl<T> File<T>
+where
+    T: Mode,
+{
     /// Closes the file. The file will automatically be closed on drop but
     /// some might like to be explicit.
     pub fn close(self) {}
-
-    pub fn delete(path: &CStr) -> c_int {
-        unsafe { unlink(path.as_ptr()) }
-    }
-
-    pub fn rename(old_path: &CStr, new_path: &CStr) -> c_int {
-        unsafe { rename(old_path.as_ptr(), new_path.as_ptr()) }
-    }
 }
 
 /// The error enum for File
@@ -199,7 +205,7 @@ where
 
 #[allow(unused)]
 pub fn test_file() {
-    if let Ok(mut f) = File::open(c"/usb/test.txt", WriteBytes) {
+    if let Ok(mut f) = open(c"/usb/test.txt", WriteBytes) {
         log_info!("Test File Opened");
         match f.write(b"Hello World\n") {
             Ok(written) => {

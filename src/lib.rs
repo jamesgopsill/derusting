@@ -6,6 +6,8 @@ use core::{
 };
 
 use critical_section::Mutex;
+use embassy_futures::join::{join, join5};
+use embassy_sync::channel::Channel;
 use embassy_time_queue_utils::Queue;
 use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
 use static_cell::StaticCell;
@@ -18,10 +20,10 @@ use crate::{
         task::Task,
         time_driver::FreeRtosTimeDriver,
     },
-    lwip::{init_tcp_service, init_udp_service},
+    lwip::{tcp::TcpListener, udp::UdpSock},
     marlin::{is_ready, set_offline},
     tasks::{
-        tcp::tcp_handler_task,
+        tcp::tcp_worker,
         udp::{address_book_lifetime_check, heartbeat, manage_ledger, udp_receiver},
     },
 };
@@ -36,6 +38,9 @@ mod lwip;
 mod marlin;
 mod panic;
 mod tasks;
+
+pub const UDP_PORT: u16 = 9090;
+pub const TCP_PORT: u16 = 8080;
 
 /// Define our global allocator for those times we want to make use
 /// of `alloc` and the heap.
@@ -94,36 +99,43 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
 
     // TODO: Clear `.gcode` files from the USB stick if it has old jobs on it.
 
-    let udp_sock = init_udp_service();
-    let tcp_handler = init_tcp_service();
-
     log_info!("Initialising Executor");
+
     let executor = EXECUTOR.init(FreeRtosTaskExecutor::new(current_task as _));
 
-    executor.run(|spawner| {
-        if let Some(udp_sock) = udp_sock {
-            match heartbeat(udp_sock) {
-                Ok(t) => spawner.spawn(t),
-                Err(e) => log_error!("Spawn Error: {e}"),
-            }
-            match udp_receiver(udp_sock) {
-                Ok(t) => spawner.spawn(t),
-                Err(e) => log_error!("Spawn Error: {e}"),
-            }
-            match tcp_handler_task(tcp_handler, udp_sock, spawner) {
-                Ok(t) => spawner.spawn(t),
-                Err(e) => log_error!("Spawn Error: {e}"),
-            }
-            match address_book_lifetime_check() {
-                Ok(t) => spawner.spawn(t),
-                Err(e) => log_error!("Spawn Error: {e}"),
-            }
-            match manage_ledger(udp_sock) {
-                Ok(t) => spawner.spawn(t),
-                Err(e) => log_error!("Spawn Error: {e}"),
-            }
-        } else {
-            log_error!("No UDP socket");
-        }
+    executor.run(|spawner| match embassy_main() {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
     })
+}
+
+#[embassy_executor::task(pool_size = 1)]
+async fn embassy_main() {
+    let udp_channel = Channel::<_, _, 8>::new();
+    let udp = UdpSock::new(udp_channel.sender());
+    let mut udp = core::pin::pin!(udp);
+    if udp.as_mut().listen(UDP_PORT).is_err() {
+        log_critical!("UDP failed");
+        return;
+    };
+    log_info!("UDP up on {UDP_PORT}");
+
+    let tcp_channel = Channel::<_, _, 2>::new();
+    let tcp = TcpListener::<'_, 2, 8>::new(tcp_channel.sender());
+    let mut tcp = core::pin::pin!(tcp);
+    if tcp.as_mut().listen(TCP_PORT).is_err() {
+        log_critical!("TCP Failed");
+        return;
+    };
+    log_info!("TCP up on {TCP_PORT}");
+
+    let fut_01 = heartbeat(&udp);
+    let fut_02 = address_book_lifetime_check();
+    let fut_03 = udp_receiver(udp_channel.receiver());
+    let fut_04 = manage_ledger(&udp);
+    let fut_05 = tcp_worker(tcp_channel.receiver(), &udp);
+    let fut_06 = tcp_worker(tcp_channel.receiver(), &udp);
+    let fut = join5(fut_01, fut_02, fut_03, fut_04, fut_05);
+    let fut = join(fut, fut_06);
+    fut.await;
 }

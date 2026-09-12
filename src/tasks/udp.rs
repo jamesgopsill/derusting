@@ -1,19 +1,20 @@
 use core::{cell::RefCell, net::Ipv4Addr};
 
-use alloc::string::ToString;
+use alloc::string::ToString as _;
+use embassy_sync::channel::Receiver;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use embedded_io::Write as _;
-use heapless::{CString, LinearMap, index_set::FnvIndexSet};
+use heapless::index_set::FnvIndexSet;
+use heapless::{CString, LinearMap};
 use uuid::Uuid;
 
-use crate::{
-    fs::{File, ReadBytes, WriteBytes},
-    log_error, log_info,
-    lwip::{UDP_PORT, my_ipaddr, packet_buffer::PacketBuffer, udp::UdpSocket},
-    marlin::{is_idle, is_ready, print, set_offline},
-    tasks::messages::{Chunk, Ledger, NetworkMessage},
-};
+use crate::fs::{self, File, ReadBytes, WriteBytes};
+use crate::lwip::my_ipaddr;
+use crate::lwip::packet_buffer::PacketBuffer;
+use crate::lwip::udp::UdpSock;
+use crate::tasks::messages::{Chunk, Ledger, NetworkMessage};
+use crate::{log_error, log_info, marlin};
 
 type AddressBook = Mutex<ThreadModeRawMutex, RefCell<LinearMap<Ipv4Addr, Instant, 32>>>;
 type StaticLedger = Mutex<ThreadModeRawMutex, RefCell<Option<Ledger>>>;
@@ -23,8 +24,7 @@ pub static LEDGER: StaticLedger = Mutex::new(RefCell::new(None));
 
 /// This task broadcasts a heartbeat to the network to inform
 /// other machines that this machine is alive and on the network.
-#[embassy_executor::task(pool_size = 1)]
-pub async fn heartbeat(sock: &'static UdpSocket) {
+pub async fn heartbeat<'a>(sock: &'a UdpSock<'a, 8>) {
     loop {
         if let Some(addr) = my_ipaddr() {
             log_info!("[{:?}] heartbeat()", addr);
@@ -33,7 +33,7 @@ pub async fn heartbeat(sock: &'static UdpSocket) {
         }
         let has_ledger = LEDGER.lock().await.borrow().is_some();
         if let Some(pbuf) = PacketBuffer::alloc(NetworkMessage::heartbeat(has_ledger))
-            && sock.broadcast(pbuf, UDP_PORT).is_err()
+            && sock.broadcast(pbuf, 9090).is_err()
         {
             log_error!("Broadcast failed.");
         }
@@ -55,7 +55,7 @@ impl FileTransfer {
             log_error!("Last file transfer timeout - Reset");
             self.fh.close();
             let path = make_path(&self.guid, true);
-            let _ = File::<ReadBytes>::delete(&path);
+            let _ = fs::delete(&path);
             return None;
         }
 
@@ -77,7 +77,7 @@ impl FileTransfer {
                 self.fh.close();
                 let partial_path = make_path(&self.guid, true);
                 let gcode_path = make_path(&self.guid, false);
-                File::<ReadBytes>::rename(&partial_path, &gcode_path);
+                fs::rname(&partial_path, &gcode_path);
                 None
             } else {
                 Some(self)
@@ -89,7 +89,7 @@ impl FileTransfer {
             log_error!("We missed a chunk. Oh well lets start again.");
             self.fh.close();
             let path = make_path(&self.guid, true);
-            let _ = File::<ReadBytes>::delete(&path);
+            let _ = fs::delete(&path);
             None
         }
     }
@@ -100,7 +100,7 @@ impl TryFrom<Chunk> for FileTransfer {
 
     fn try_from(value: Chunk) -> Result<Self, Self::Error> {
         let path = make_path(&value.guid, true);
-        let Ok(mut fh) = File::open(&path, WriteBytes) else {
+        let Ok(mut fh) = fs::open(&path, WriteBytes) else {
             log_error!("File Open Error");
             return Err(());
         };
@@ -117,12 +117,13 @@ impl TryFrom<Chunk> for FileTransfer {
 
 /// This task will receive and handle messages being sent over UDP
 /// on the network.
-#[embassy_executor::task(pool_size = 1)]
-pub async fn udp_receiver(sock: &'static UdpSocket) {
+pub async fn udp_receiver<'a>(
+    receiver: Receiver<'a, ThreadModeRawMutex, (Ipv4Addr, PacketBuffer), 8>,
+) {
     log_info!("Ready to receive UDP packets");
     let mut file_transfer: Option<FileTransfer> = None;
     loop {
-        let (addr, msg) = sock.packets.receive().await;
+        let (addr, msg) = receiver.receive().await;
         if let Some(msg) = msg.into_iter().next() {
             match postcard::from_bytes::<NetworkMessage>(msg) {
                 Ok(network_msg) => match network_msg {
@@ -191,7 +192,6 @@ pub async fn udp_receiver(sock: &'static UdpSocket) {
 
 /// This task periodically checks the address book and cleans up
 /// any address have not heard from in a while.
-#[embassy_executor::task(pool_size = 1)]
 pub async fn address_book_lifetime_check() {
     loop {
         Timer::after_secs(10).await;
@@ -206,8 +206,7 @@ pub async fn address_book_lifetime_check() {
 
 /// This task manages the token-ring ledger that is passed between
 /// machines. We only do something if we are the owner of the ledger.
-#[embassy_executor::task(pool_size = 1)]
-pub async fn manage_ledger(sock: &'static UdpSocket) -> ! {
+pub async fn manage_ledger<'a>(sock: &'a UdpSock<'a, 8>) -> ! {
     loop {
         // Give all the services time to populate the address book
         // and see who is on the network.
@@ -235,7 +234,7 @@ pub async fn manage_ledger(sock: &'static UdpSocket) -> ! {
 
         if let Some(mut l) = ledger.take() {
             log_info!("{:?}", l);
-            if is_ready() && is_idle() {
+            if marlin::is_ready() && marlin::is_idle() {
                 log_info!("Available for Jobs");
                 // 1. Am I free to take on a job and is there a job in the
                 // list I can take. If so, take it and remove it from the
@@ -244,28 +243,28 @@ pub async fn manage_ledger(sock: &'static UdpSocket) -> ! {
                 for job_guid in l.jobs.iter() {
                     let path = make_path(job_guid, true);
                     // Use open to see if we have a copy of the file
-                    if File::open(&path, ReadBytes).is_ok() {
+                    if fs::open(&path, ReadBytes).is_ok() {
                         selected_job = Some(*job_guid);
                     }
                 }
                 if let Some(job_guid) = selected_job {
                     l.jobs.remove(&job_guid);
                     let path = make_path(&job_guid, true);
-                    match print(&path, true) {
-                        Ok(_) => set_offline(),
+                    match marlin::print(&path, true) {
+                        Ok(_) => marlin::set_offline(),
                         Err(e) => {
                             log_error!("Print Error: {e}");
                         }
                     };
-                    set_offline();
+                    marlin::set_offline();
                 } else {
                     log_info!("No jobs found.");
                 }
             } else {
-                if !is_ready() {
+                if !marlin::is_ready() {
                     log_info!("Not Ready for Printing");
                 }
-                if !is_idle() {
+                if !marlin::is_idle() {
                     log_info!("Not Idle");
                 }
             }
@@ -299,7 +298,7 @@ pub async fn manage_ledger(sock: &'static UdpSocket) -> ! {
                 for _i in 0..3 {
                     // TODO: Consider passing a reference.
                     if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                        && sock.broadcast(pbuf, UDP_PORT).is_err()
+                        && sock.broadcast(pbuf, 9090).is_err()
                     {
                         log_error!("Broadcast failed.");
                     }

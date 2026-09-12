@@ -1,211 +1,224 @@
-use core::ffi::c_void;
+use core::{ffi::c_void, marker::PhantomPinned, pin::Pin};
 
-use alloc::boxed::Box;
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
+use embassy_sync::{
+    blocking_mutex::raw::ThreadModeRawMutex,
+    channel::{Channel, Sender},
+};
 
 use crate::{
-    log_error,
+    log_error, log_info,
     lwip::{bindings::*, packet_buffer::PacketBuffer},
 };
 
-pub trait Mode {}
-
-pub struct InThread;
-impl Mode for InThread {}
-
-pub struct OutThread;
-impl Mode for OutThread {}
-
-pub struct TcpProtocolControlBlock<T: Mode> {
-    inner: *mut lwip_pcb,
-    _mode: T,
+pub struct TcpListener<'a, const N: usize, const M: usize> {
+    pcb: *mut lwip_pcb,
+    sender: Sender<'a, ThreadModeRawMutex, *mut lwip_pcb, N>,
+    _pin: PhantomPinned,
 }
 
-impl TryFrom<*mut lwip_pcb> for TcpProtocolControlBlock<InThread> {
-    type Error = ();
-    fn try_from(value: *mut lwip_pcb) -> Result<Self, ()> {
-        if value.is_null() {
-            Err(())
-        } else {
-            Ok(Self {
-                inner: value,
-                _mode: InThread,
-            })
-        }
-    }
-}
-
-impl TryFrom<*mut lwip_pcb> for TcpProtocolControlBlock<OutThread> {
-    type Error = ();
-    fn try_from(value: *mut lwip_pcb) -> Result<Self, ()> {
-        if value.is_null() {
-            Err(())
-        } else {
-            Ok(Self {
-                inner: value,
-                _mode: OutThread,
-            })
-        }
-    }
-}
-
-impl From<TcpProtocolControlBlock<InThread>> for TcpProtocolControlBlock<OutThread> {
-    fn from(value: TcpProtocolControlBlock<InThread>) -> Self {
-        TcpProtocolControlBlock {
-            inner: value.inner,
-            _mode: OutThread,
-        }
-    }
-}
-
-impl<T: Mode> TcpProtocolControlBlock<T> {
-    pub fn as_mut_ptr(&self) -> *mut lwip_pcb {
-        self.inner
-    }
-}
-
-impl TcpProtocolControlBlock<InThread> {
-    pub fn arg(&self, arg: *mut c_void) {
-        unsafe { tcp_arg(self.as_mut_ptr(), arg) };
-    }
-
-    pub fn recv(&self, callback: Option<TcpRecvFn>) {
-        unsafe { tcp_recv(self.as_mut_ptr(), callback) };
-    }
-
-    pub fn err(&self, callback: Option<LwipErrFn>) {
-        unsafe { tcp_err(self.as_mut_ptr(), callback) };
-    }
-
-    pub fn close(&self) -> Result<(), LwipError> {
-        let err = unsafe { tcp_close(self.as_mut_ptr()) };
-        err.into()
-    }
-
-    pub fn recved(&self, len: u16) {
-        unsafe { tcp_recved(self.as_mut_ptr(), len) };
-    }
-
-    pub fn write(&self, slice: &[u8]) -> Result<(), LwipError> {
-        let err = unsafe {
-            tcp_write(
-                self.as_mut_ptr(),
-                slice.as_ptr(),
-                slice.len() as u16,
-                TCP_WRITE_FLAG_COPY,
-            )
-        };
-        err.into()
-    }
-
-    pub fn output(&self) -> Result<(), LwipError> {
-        let err = unsafe { tcp_output(self.as_mut_ptr()) };
-        err.into()
-    }
-
-    pub fn bind(&self, port: u16) -> Result<(), LwipError> {
-        let err = unsafe { tcp_bind(self.as_mut_ptr(), &ip_addr_any, port) };
-        err.into()
-    }
-
-    pub fn accept(&self, callback: Option<TcpAcceptFn>) {
-        unsafe { tcp_accept(self.as_mut_ptr(), callback) };
-    }
-
-    pub fn listen_with_backlog(&self, backlog: u8) -> Result<Self, ()> {
-        let pcb = unsafe { tcp_listen_with_backlog(self.as_mut_ptr(), backlog) };
-        Self::try_from(pcb)
-    }
-
-    pub fn sent(&self, callback: Option<TcpSentFn>) {
-        unsafe {
-            tcp_sent(self.as_mut_ptr(), callback);
-        }
-    }
-}
-
-impl TcpProtocolControlBlock<OutThread> {
-    pub fn new() -> Result<Self, ()> {
-        unsafe { sys_mutex_lock(&raw mut lock_tcpip_core) };
-        let pcb = unsafe { tcp_new() };
-        unsafe { sys_mutex_unlock(&raw mut lock_tcpip_core) };
-        Self::try_from(pcb)
-    }
-
-    pub fn with_core<R>(
-        &mut self,
-        fcn: impl FnOnce(&mut TcpProtocolControlBlock<InThread>) -> R,
-    ) -> R {
-        let pcb = unsafe { &mut *(self as *mut Self as *mut TcpProtocolControlBlock<InThread>) };
-        unsafe { sys_mutex_lock(&raw mut lock_tcpip_core) };
-        let res = fcn(pcb);
-        unsafe { sys_mutex_unlock(&raw mut lock_tcpip_core) };
-        res
-    }
-}
-
-pub type TcpHandler = embassy_sync::channel::Channel<ThreadModeRawMutex, Box<TcpHandle>, 3>;
-
-pub struct TcpHandle {
-    pub packets: embassy_sync::channel::Channel<ThreadModeRawMutex, Option<PacketBuffer>, 10>,
-    pub pcb: TcpProtocolControlBlock<OutThread>,
-    closed: bool,
-}
-
-impl TcpHandle {
-    pub fn new(pcb: TcpProtocolControlBlock<InThread>) -> Self {
-        let pcb = TcpProtocolControlBlock {
-            inner: pcb.inner,
-            _mode: OutThread,
-        };
+impl<'a, const N: usize, const M: usize> TcpListener<'a, N, M> {
+    pub fn new(sender: Sender<'a, ThreadModeRawMutex, *mut lwip_pcb, N>) -> Self {
         Self {
-            packets: Channel::new(),
-            pcb,
-            closed: false,
+            pcb: core::ptr::null_mut(),
+            sender,
+            _pin: PhantomPinned,
         }
     }
 
-    pub fn close(&mut self) {
-        self.pcb.with_core(|pcb| {
-            pcb.recv(None);
-            pcb.err(None);
-            pcb.sent(None);
-            pcb.accept(None);
-            if let Err(e) = pcb.output() {
-                log_error!("handler.close(): {e:?}");
+    pub fn listen(self: Pin<&mut Self>, port: u16) -> Result<(), ()> {
+        unsafe {
+            let this = self.get_unchecked_mut();
+            sys_mutex_lock(&raw mut lock_tcpip_core);
+            this.pcb = tcp_new();
+            let err = tcp_bind(this.pcb, &ip_addr_any, port);
+            if err != LwipError::Ok {
+                tcp_close(this.pcb);
+                return Err(());
             }
-            if let Err(e) = pcb.close() {
-                log_error!("handler.close(): {e:?}");
+            this.pcb = tcp_listen_with_backlog(this.pcb, 1);
+            if this.pcb.is_null() {
+                return Err(());
             }
-        });
-        self.packets.clear();
-        self.closed = true;
-    }
-
-    // Out of thread function
-    pub fn respond(&mut self, bytes: &[u8]) {
-        // Can only send once. Ignore repeated calls.
-        if !self.closed {
-            self.pcb.with_core(|pcb| {
-                if let Err(e) = pcb.write(bytes) {
-                    log_error!("handler.send_response(): {e:?}");
-                }
-            });
-            self.close();
+            let ctx_ptr = this as *mut Self as *mut c_void;
+            tcp_arg(this.pcb, ctx_ptr);
+            tcp_accept(this.pcb, Some(Self::_accept));
+            sys_mutex_unlock(&raw mut lock_tcpip_core);
+            Ok(())
         }
     }
 
-    pub unsafe fn recv_arg(&mut self, arg: *mut c_void) {
-        unsafe { tcp_arg(self.pcb.inner, arg) };
+    pub unsafe extern "C" fn _accept(
+        arg: *mut c_void,
+        pcb: *mut lwip_pcb,
+        err: LwipError,
+    ) -> LwipError {
+        log_info!("on_accept");
+        if err != LwipError::Ok {
+            log_error!("TCPError");
+            return LwipError::Ok;
+        }
+
+        if pcb.is_null() {
+            log_error!("PCB Null");
+            return LwipError::Ok;
+        }
+
+        if arg.is_null() {
+            return LwipError::Ok;
+        }
+
+        let listener = unsafe { &*(arg as *const TcpListener<'a, N, M>) };
+
+        if listener.sender.try_send(pcb).is_err() {
+            log_error!("TCP Listener Channel Full");
+        };
+
+        LwipError::Ok
     }
 }
 
-impl Drop for TcpHandle {
-    // If we haven't closed the handle then close it before
-    // we drop it.
+impl<'a, const N: usize, const M: usize> Drop for TcpListener<'a, N, M> {
     fn drop(&mut self) {
-        if !self.closed {
-            self.close();
+        unsafe {
+            sys_mutex_lock(&raw mut lock_tcpip_core);
+            tcp_accept(self.pcb, None);
+            tcp_arg(self.pcb, core::ptr::null_mut());
+            let err = tcp_close(self.pcb);
+            if err != LwipError::Ok {
+                log_error!("tcp_close: {err:?}");
+            }
+            self.sender.clear();
+            sys_mutex_unlock(&raw mut lock_tcpip_core);
+        }
+    }
+}
+
+// TODO: We need to send *mut lwip_buf through the channel
+// and pin construct the TcpConn on receipt for the channel
+// to prevent it moving on the stack.
+
+pub struct TcpConn<const N: usize> {
+    pcb: *mut lwip_pcb,
+    channel: Channel<ThreadModeRawMutex, Option<PacketBuffer>, N>,
+    _pin: PhantomPinned,
+}
+
+impl<const N: usize> TcpConn<N> {
+    pub fn new(pcb: *mut lwip_pcb) -> Self {
+        Self {
+            pcb,
+            channel: Channel::new(),
+            _pin: PhantomPinned,
+        }
+    }
+
+    pub fn attach_callbacks(self: Pin<&mut Self>) {
+        unsafe {
+            let this = self.get_unchecked_mut();
+            sys_mutex_lock(&raw mut lock_tcpip_core);
+            let ctx_ptr = this as *mut Self as *mut c_void;
+            tcp_arg(this.pcb, ctx_ptr);
+            tcp_recv(this.pcb, Some(Self::_recv));
+            tcp_err(this.pcb, Some(Self::_err));
+            tcp_sent(this.pcb, Some(Self::_sent));
+            sys_mutex_unlock(&raw mut lock_tcpip_core);
+        }
+    }
+
+    pub async fn receive(self: Pin<&Self>) -> Option<PacketBuffer> {
+        self.channel.receive().await
+    }
+
+    pub fn response(self: Pin<&mut Self>, bytes: &[u8]) -> Result<(), LwipError> {
+        log_info!("Writing response");
+        unsafe {
+            let this = self.get_unchecked_mut();
+            sys_mutex_lock(&raw mut lock_tcpip_core);
+            let err = tcp_write(
+                this.pcb,
+                bytes.as_ptr(),
+                bytes.len() as u16,
+                TCP_WRITE_FLAG_COPY,
+            );
+            if err != LwipError::Ok {
+                log_error!("TCP Write Error");
+                sys_mutex_unlock(&raw mut lock_tcpip_core);
+                return Err(err);
+            }
+            let err = tcp_output(this.pcb);
+            log_info!("tcp_output: {err:?}");
+            if err != LwipError::Ok {
+                log_error!("tcp_output: {err:?}");
+            }
+            sys_mutex_unlock(&raw mut lock_tcpip_core);
+            Ok(())
+        }
+    }
+
+    unsafe extern "C" fn _recv(
+        arg: *mut c_void,
+        _pcb: *mut lwip_pcb,
+        pbuf: *mut lwip_pbuf,
+        _err: LwipError,
+    ) -> LwipError {
+        log_info!("_recv()");
+        if arg.is_null() {
+            return LwipError::Val;
+        }
+        let conn = unsafe { &*(arg as *const TcpConn<N>) };
+        let Ok(pb) = PacketBuffer::try_from(pbuf) else {
+            let _ = conn.channel.try_send(None);
+            return LwipError::Val;
+        };
+
+        let len = pb.total_len();
+        match conn.channel.try_send(Some(pb)) {
+            Ok(_) => {
+                unsafe { tcp_recved(conn.pcb, len) };
+                LwipError::Ok
+            }
+            Err(_) => {
+                log_error!("Channel is Full");
+                LwipError::Mem
+            }
+        }
+    }
+
+    unsafe extern "C" fn _err(arg: *mut c_void, _err: LwipError) {
+        log_info!("_err()");
+        if !arg.is_null() {
+            log_error!("on_tcp_err");
+            let conn = unsafe { &*(arg as *const TcpConn<N>) };
+            let _ = conn.channel.try_send(None);
+        }
+    }
+
+    unsafe extern "C" fn _sent(_arg: *mut c_void, _pcb: *mut lwip_pcb, _len: u16) -> LwipError {
+        log_info!("_sent()");
+        LwipError::Ok
+    }
+}
+
+impl<const N: usize> Drop for TcpConn<N> {
+    fn drop(&mut self) {
+        log_info!("Dropping TcpConn");
+        unsafe {
+            sys_mutex_lock(&raw mut lock_tcpip_core);
+            tcp_recv(self.pcb, None);
+            tcp_err(self.pcb, None);
+            tcp_sent(self.pcb, None);
+            tcp_arg(self.pcb, core::ptr::null_mut());
+            let err = tcp_output(self.pcb);
+            log_info!("tcp_output: {err:?}");
+            if err != LwipError::Ok {
+                log_error!("tcp_output: {err:?}");
+            }
+            let err = tcp_close(self.pcb);
+            if err != LwipError::Ok {
+                log_error!("tcp_close: {err:?}");
+            }
+            sys_mutex_unlock(&raw mut lock_tcpip_core);
+            self.channel.clear();
         }
     }
 }
