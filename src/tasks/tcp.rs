@@ -138,7 +138,7 @@ pub async fn handle_conn<const N: usize, const M: usize>(
                     let msg = NetworkMessage::new_job(guid);
                     for _i in 0..5 {
                         if let Some(pbuf) = PacketBuffer::alloc(&msg) {
-                            if udp.broadcast(pbuf, 9090).is_err() {
+                            if udp.broadcast(pbuf).await.is_err() {
                                 log_error!("Broadcasting job failed.");
                             } else {
                                 log_info!("Job message sent");
@@ -173,7 +173,7 @@ pub async fn handle_conn<const N: usize, const M: usize>(
                             // Send a repeated set of messages
                             for _i in 0..3 {
                                 if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                                    && udp.broadcast(pbuf, 9090).is_err()
+                                    && udp.broadcast(pbuf).await.is_err()
                                 {
                                     log_error!("Broadcasting job chunk failed.");
                                 }

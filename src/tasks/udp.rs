@@ -33,7 +33,7 @@ pub async fn heartbeat<const N: usize>(udp: Pin<&UdpSocket<N>>) {
         }
         let has_ledger = LEDGER.lock().await.borrow().is_some();
         if let Some(pbuf) = PacketBuffer::alloc(NetworkMessage::heartbeat(has_ledger))
-            && udp.as_ref().broadcast(pbuf, 9090).is_err()
+            && udp.as_ref().broadcast(pbuf).await.is_err()
         {
             log_error!("Broadcast failed.");
         }
@@ -299,7 +299,7 @@ pub async fn manage_ledger<const N: usize>(udp: Pin<&UdpSocket<N>>) -> ! {
                 for _i in 0..3 {
                     // TODO: Consider passing a reference.
                     if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                        && udp.as_ref().broadcast(pbuf, UDP_PORT).is_err()
+                        && udp.as_ref().broadcast(pbuf).await.is_err()
                     {
                         log_error!("Broadcast failed.");
                     }

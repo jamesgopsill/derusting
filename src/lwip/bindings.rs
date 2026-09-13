@@ -263,4 +263,10 @@ unsafe extern "C" {
 
     /// The default network interface used for routing when no specific interface matches.
     pub(super) static netif_default: *mut lwip_netif;
+
+    /// LWIP function callback to run in thread.
+    pub(super) fn tcpip_callback(
+        callback: unsafe extern "C" fn(ctx: *mut c_void),
+        ctx: *mut c_void,
+    );
 }

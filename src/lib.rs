@@ -112,7 +112,7 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
 async fn embassy_main() {
     let udp = UdpSocket::<6>::new();
     let mut udp = core::pin::pin!(udp);
-    if udp.as_mut().listen(UDP_PORT).is_err() {
+    if udp.as_mut().listen(UDP_PORT).await.is_err() {
         log_critical!("UDP failed");
         return;
     };
@@ -127,6 +127,8 @@ async fn embassy_main() {
     log_info!("TCP up on {TCP_PORT}");
 
     let fut_01 = heartbeat(udp.as_ref());
+    fut_01.await;
+    /*
     let fut_02 = address_book_lifetime_check();
     let fut_03 = udp_receiver(udp.as_ref());
     let fut_04 = manage_ledger(udp.as_ref());
@@ -135,4 +137,5 @@ async fn embassy_main() {
     let fut = join5(fut_01, fut_02, fut_03, fut_04, fut_05);
     let fut = join(fut, fut_06);
     fut.await;
+    */
 }
