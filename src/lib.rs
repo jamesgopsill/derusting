@@ -120,15 +120,13 @@ async fn embassy_main() {
 
     let tcp = TcpListener::<2, 8>::new();
     let mut tcp = core::pin::pin!(tcp);
-    if tcp.as_mut().listen(TCP_PORT).is_err() {
+    if tcp.as_mut().listen(TCP_PORT).await.is_err() {
         log_critical!("TCP Failed");
         return;
     };
     log_info!("TCP up on {TCP_PORT}");
 
     let fut_01 = heartbeat(udp.as_ref());
-    fut_01.await;
-    /*
     let fut_02 = address_book_lifetime_check();
     let fut_03 = udp_receiver(udp.as_ref());
     let fut_04 = manage_ledger(udp.as_ref());
@@ -137,5 +135,4 @@ async fn embassy_main() {
     let fut = join5(fut_01, fut_02, fut_03, fut_04, fut_05);
     let fut = join(fut, fut_06);
     fut.await;
-    */
 }

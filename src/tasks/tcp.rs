@@ -4,6 +4,7 @@ use embassy_time::Timer;
 use embedded_io::{Read as _, Write as _};
 
 use crate::{
+    UDP_PORT,
     fs::{self, ReadBytes, WriteBytes},
     http::{BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK},
     log_error, log_info,
@@ -47,19 +48,19 @@ pub async fn handle_conn<const N: usize, const M: usize>(
     let mut iter = pbuf.into_iter();
 
     let Some(chunk) = iter.next() else {
-        let _ = conn.response(BAD_REQUEST.as_bytes());
+        let _ = conn.response(BAD_REQUEST.as_bytes()).await;
         return;
     };
 
     let Some((start_line, headers, body)) = split_request(chunk) else {
-        let _ = conn.response(BAD_REQUEST.as_bytes());
+        let _ = conn.response(BAD_REQUEST.as_bytes()).await;
         return;
     };
 
     let method = match check_start_line(start_line) {
         Ok(method) => method,
         Err(e) => {
-            let _ = conn.response(e.as_bytes());
+            let _ = conn.response(e.as_bytes()).await;
             return;
         }
     };
@@ -67,12 +68,12 @@ pub async fn handle_conn<const N: usize, const M: usize>(
     match method {
         Method::Get => {
             log_info!("/ GET request");
-            let _ = conn.response(INDEX_HTML.as_bytes());
+            let _ = conn.response(INDEX_HTML.as_bytes()).await;
         }
         Method::Put => {
             log_info!("/ PUT request");
             let Ok(mut content_length) = check_put_header(headers) else {
-                let _ = conn.response(BAD_REQUEST.as_bytes());
+                let _ = conn.response(BAD_REQUEST.as_bytes()).await;
                 return;
             };
 
@@ -80,7 +81,7 @@ pub async fn handle_conn<const N: usize, const M: usize>(
             let path = make_path(&guid, true);
 
             let Ok(mut f) = fs::open(path.as_c_str(), WriteBytes) else {
-                let _ = conn.response(INTERNAL_SERVER_ERROR.as_bytes());
+                let _ = conn.response(INTERNAL_SERVER_ERROR.as_bytes()).await;
                 return;
             };
 
@@ -123,7 +124,7 @@ pub async fn handle_conn<const N: usize, const M: usize>(
             }
 
             f.close();
-            let _ = conn.response(OK.as_bytes());
+            let _ = conn.response(OK.as_bytes()).await;
 
             // Append to the ledger or send our new job request...
             // Communicate the new job across the network
@@ -138,7 +139,7 @@ pub async fn handle_conn<const N: usize, const M: usize>(
                     let msg = NetworkMessage::new_job(guid);
                     for _i in 0..5 {
                         if let Some(pbuf) = PacketBuffer::alloc(&msg) {
-                            if udp.broadcast(pbuf).await.is_err() {
+                            if udp.broadcast(pbuf, UDP_PORT).await.is_err() {
                                 log_error!("Broadcasting job failed.");
                             } else {
                                 log_info!("Job message sent");
@@ -173,7 +174,7 @@ pub async fn handle_conn<const N: usize, const M: usize>(
                             // Send a repeated set of messages
                             for _i in 0..3 {
                                 if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                                    && udp.broadcast(pbuf).await.is_err()
+                                    && udp.broadcast(pbuf, UDP_PORT).await.is_err()
                                 {
                                     log_error!("Broadcasting job chunk failed.");
                                 }

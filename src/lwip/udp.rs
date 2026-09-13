@@ -3,14 +3,38 @@ use core::{ffi::c_void, marker::PhantomPinned, net::Ipv4Addr, pin::Pin};
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel, signal::Signal};
 
 use crate::{
-    log_error, log_info,
+    log_error,
     lwip::{bindings::*, packet_buffer::PacketBuffer},
 };
+
+struct ListenContext {
+    port: u16,
+    socket_ptr: *mut c_void,
+    signal: Signal<ThreadModeRawMutex, Result<*mut lwip_pcb, LwipError>>,
+}
+
+impl ListenContext {
+    fn as_mut_ptr(&mut self) -> *mut c_void {
+        self as *mut _ as *mut c_void
+    }
+}
+
+struct BroadcastContext {
+    pcb: *mut lwip_pcb,
+    port: u16,
+    pbuf: PacketBuffer,
+    signal: Signal<ThreadModeRawMutex, Result<(), LwipError>>,
+}
+
+impl BroadcastContext {
+    fn as_mut_ptr(&mut self) -> *mut c_void {
+        self as *mut _ as *mut c_void
+    }
+}
 
 pub struct UdpSocket<const N: usize> {
     pcb: *mut lwip_pcb,
     channel: Channel<ThreadModeRawMutex, (Ipv4Addr, PacketBuffer), N>,
-    port: u16,
     _pin: PhantomPinned,
 }
 
@@ -19,25 +43,25 @@ impl<const N: usize> UdpSocket<N> {
         Self {
             pcb: core::ptr::null_mut(),
             channel: Channel::new(),
-            port: 9090,
             _pin: PhantomPinned,
         }
     }
 
-    pub async fn listen(self: Pin<&mut Self>, port: u16) -> Result<(), ()> {
+    pub fn as_mut_ptr(&mut self) -> *mut c_void {
+        self as *mut _ as *mut c_void
+    }
+
+    pub async fn listen(self: Pin<&mut Self>, port: u16) -> Result<(), LwipError> {
         let this = unsafe { self.get_unchecked_mut() };
-        this.port = port;
-        let this_ptr = this as *mut _ as *mut c_void;
-        let mut signal: Signal<ThreadModeRawMutex, bool> = Signal::new();
-        let signal_ptr = &mut signal as *mut _ as *mut c_void;
-        let mut tuple = (this_ptr, signal_ptr);
-        let ctx = &mut tuple as *mut _ as *mut c_void;
-        unsafe { tcpip_callback(Self::_listen, ctx) };
-        let res = signal.wait().await;
-        match res {
-            true => Ok(()),
-            false => Err(()),
-        }
+        let mut ctx = ListenContext {
+            port,
+            socket_ptr: this.as_mut_ptr(),
+            signal: Signal::new(),
+        };
+        unsafe { tcpip_callback(Self::_listen, ctx.as_mut_ptr()) };
+        let pcb = ctx.signal.wait().await?;
+        this.pcb = pcb;
+        Ok(())
     }
 
     unsafe extern "C" fn _listen(ctx: *mut c_void) {
@@ -45,81 +69,35 @@ impl<const N: usize> UdpSocket<N> {
             if ctx.is_null() {
                 return;
             }
-            let (udp_ptr, signal_ptr) =
-                *(ctx as *const (*mut Self, *mut Signal<ThreadModeRawMutex, bool>));
-
-            let udp: &mut Self = &mut *udp_ptr;
-            let signal: &mut Signal<ThreadModeRawMutex, bool> = &mut *signal_ptr;
-
-            if !udp.pcb.is_null() {
-                // PCB already exists
-                // TODO: close and reallocate is a future
-                // possibility.
-                signal.signal(false);
-                return;
-            }
-            log_info!("New UDP");
-            udp.pcb = udp_new();
-            let err = udp_bind(udp.pcb, &ip_addr_any, udp.port);
+            let ctx = &mut *(ctx as *mut ListenContext);
+            let pcb = udp_new();
+            let err = udp_bind(pcb, &ip_addr_any, ctx.port);
             if err != LwipError::Ok {
-                log_info!("Binding error");
-                udp_remove(udp.pcb);
-                udp.pcb = core::ptr::null_mut();
-                signal.signal(false);
+                udp_remove(pcb);
+                ctx.signal.signal(Err(err));
             } else {
-                log_info!("Binding success");
-                udp_recv(udp.pcb, Some(Self::recv), udp_ptr as *mut c_void);
-                signal.signal(true);
+                udp_recv(pcb, Some(Self::recv), ctx.socket_ptr);
+                ctx.signal.signal(Ok(pcb));
             }
         }
     }
 
-    /*
-    pub fn listen(self: Pin<&mut Self>, port: u16) -> Result<(), ()> {
-        unsafe {
-            // Safety: We do not move `*this` out of memory.
-            let this = self.get_unchecked_mut();
-            sys_mutex_lock(&raw mut lock_tcpip_core);
-            this.pcb = udp_new();
-            let err = udp_bind(this.pcb, &ip_addr_any, port);
-            if err != LwipError::Ok {
-                udp_remove(this.pcb);
-                sys_mutex_unlock(&raw mut lock_tcpip_core);
-                return Err(());
-            }
-            let ctx_ptr = this as *mut Self as *mut c_void;
-            udp_recv(this.pcb, Some(Self::recv), ctx_ptr);
-            sys_mutex_unlock(&raw mut lock_tcpip_core);
-            Ok(())
-        }
-    }
-    */
-
-    pub async fn broadcast(self: Pin<&Self>, mut pbuf: PacketBuffer) -> Result<(), ()> {
+    pub async fn broadcast(
+        self: Pin<&Self>,
+        pbuf: PacketBuffer,
+        port: u16,
+    ) -> Result<(), LwipError> {
         if self.pcb.is_null() {
-            return Err(());
+            return Err(LwipError::Val);
         }
-        let pcb_ptr = self.pcb;
-        let mut signal: Signal<ThreadModeRawMutex, bool> = Signal::new();
-        let signal_ptr = &mut signal as *mut _ as *mut c_void;
-        let pbuf_ptr = pbuf.as_mut_ptr();
-        let mut tuple = (pcb_ptr, signal_ptr, pbuf_ptr, self.port);
-        let ctx = &mut tuple as *mut _ as *mut c_void;
-        unsafe { tcpip_callback(Self::_broadcast, ctx) };
-        let res = signal.wait().await;
-        log_info!("Sent: {res}");
-        match res {
-            true => Ok(()),
-            false => Err(()),
-        }
-
-        /*
-        sys_mutex_lock(&raw mut lock_tcpip_core);
-        let addr: lwip_ipaddr = lwip_ipaddr { addr: u32::MAX };
-        let err = udp_sendto(self.pcb, pbuf.as_mut_ptr(), &addr, port);
-        sys_mutex_unlock(&raw mut lock_tcpip_core);
-        err.into()
-        */
+        let mut ctx = BroadcastContext {
+            pcb: self.pcb,
+            port,
+            pbuf,
+            signal: Signal::new(),
+        };
+        unsafe { tcpip_callback(Self::_broadcast, ctx.as_mut_ptr()) };
+        ctx.signal.wait().await
     }
 
     unsafe extern "C" fn _broadcast(ctx: *mut c_void) {
@@ -127,28 +105,19 @@ impl<const N: usize> UdpSocket<N> {
             if ctx.is_null() {
                 return;
             }
-            // Unpack the tuple
-            let (pcb, signal_ptr, pbuf, port) = *(ctx as *const (
-                *mut lwip_pcb,
-                *mut Signal<ThreadModeRawMutex, bool>,
-                *mut lwip_pbuf,
-                u16,
-            ));
-            // Reconstruct them
-            let signal: &mut Signal<ThreadModeRawMutex, bool> = &mut *signal_ptr;
-
-            if pcb.is_null() {
+            let ctx = &mut *(ctx as *mut BroadcastContext);
+            if ctx.pcb.is_null() {
                 log_error!("PCB is null");
-                signal.signal(false);
+                ctx.signal.signal(Err(LwipError::Val));
                 return;
             }
             let addr: lwip_ipaddr = lwip_ipaddr { addr: u32::MAX };
-            let err = udp_sendto(pcb, pbuf, &addr, port);
+            let err = udp_sendto(ctx.pcb, ctx.pbuf.as_mut_ptr(), &addr, ctx.port);
             if err == LwipError::Ok {
-                signal.signal(true);
+                ctx.signal.signal(Ok(()));
             } else {
                 log_error!("{err:?}");
-                signal.signal(false);
+                ctx.signal.signal(Err(err));
             }
         }
     }
