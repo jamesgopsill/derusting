@@ -1,26 +1,12 @@
 use core::{ffi::c_void, marker::PhantomPinned, pin::Pin, sync::atomic::Ordering};
 
-use embassy_sync::{
-    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
-};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use portable_atomic::AtomicPtr;
 
 use crate::{
     log_error, log_info,
-    lwip::{bindings::*, packet_buffer::PacketBuffer},
+    lwip::{bindings::*, execute_in_tcpip_thread, packet_buffer::PacketBuffer},
 };
-
-struct ListenContext {
-    port: u16,
-    listener_ptr: *mut c_void,
-    signal: Signal<CriticalSectionRawMutex, Result<*mut lwip_pcb, LwipError>>,
-}
-
-impl ListenContext {
-    fn as_mut_ptr(&mut self) -> *mut c_void {
-        self as *mut _ as *mut c_void
-    }
-}
 
 /// Accepts new TCP connections through LWIP.
 pub struct TcpListener<const N: usize, const M: usize> {
@@ -43,52 +29,30 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
     }
 
     pub async fn listen(&'static self, port: u16) -> Result<(), LwipError> {
-        // Prevent re-binding if already listening
-        if !self.pcb.load(Ordering::Acquire).is_null() {
-            return Err(LwipError::Val);
-        }
-        let ctx = ListenContext {
-            port,
-            listener_ptr: self.as_mut_ptr(),
-            signal: Signal::new(),
-        };
-        let mut ctx = core::pin::pin!(ctx);
-        let err = unsafe { tcpip_callback(Self::_listen, ctx.as_mut_ptr()) };
-        if err != LwipError::Ok {
-            return Err(err);
-        }
-        let pcb = ctx.signal.wait().await?;
-        self.pcb.store(pcb, Ordering::Release);
-        Ok(())
-    }
-
-    unsafe extern "C" fn _listen(ctx: *mut c_void) {
-        unsafe {
-            if ctx.is_null() {
-                return;
+        execute_in_tcpip_thread(|| unsafe {
+            if !self.pcb.load(Ordering::Acquire).is_null() {
+                return Err(LwipError::Val);
             }
-            let ctx = &mut *(ctx as *mut ListenContext);
             let pcb = tcp_new();
             if pcb.is_null() {
-                ctx.signal.signal(Err(LwipError::Mem));
-                return;
+                return Err(LwipError::Mem);
             }
-            let err = tcp_bind(pcb, &ip_addr_any, ctx.port);
+            let err = tcp_bind(pcb, &ip_addr_any, port);
             if err != LwipError::Ok {
                 tcp_close(pcb);
-                ctx.signal.signal(Err(err));
-                return;
+                return Err(err);
             }
             let listen_pcb = tcp_listen_with_backlog(pcb, 1);
             if listen_pcb.is_null() {
                 // tcp_close(pcb); unsure I think lwip handles this
-                ctx.signal.signal(Err(LwipError::Mem));
-                return;
+                return Err(LwipError::Mem);
             }
-            tcp_arg(listen_pcb, ctx.listener_ptr);
+            tcp_arg(listen_pcb, self.as_mut_ptr());
             tcp_accept(listen_pcb, Some(Self::_accept));
-            ctx.signal.signal(Ok(listen_pcb))
-        }
+            self.pcb.store(listen_pcb, Ordering::Release);
+            Ok(())
+        })
+        .await
     }
 
     /// An internal function to handle LWIP callback when accepting
@@ -134,7 +98,7 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
         let pcb = self.channel.receive().await;
         let conn = TcpConnection::<M>::new(pcb);
         let mut conn = core::pin::pin!(conn);
-        conn.as_mut().attach_callbacks().await;
+        let _ = conn.as_mut().attach_callbacks().await;
         fcn(conn).await;
     }
 }
@@ -163,35 +127,6 @@ impl<const N: usize, const M: usize> Drop for TcpListener<N, M> {
     }
 }
 
-// TODO: We need to send *mut lwip_buf through the channel
-// and pin construct the TcpConn on receipt for the channel
-// to prevent it moving on the stack.
-
-struct AttachContext {
-    pcb: *mut lwip_pcb,
-    conn_ptr: *mut c_void,
-    signal: Signal<CriticalSectionRawMutex, bool>,
-}
-
-impl AttachContext {
-    fn as_mut_ptr(&mut self) -> *mut c_void {
-        self as *mut _ as *mut c_void
-    }
-}
-
-struct ResponseContext {
-    pcb: *mut lwip_pcb,
-    bytes_ptr: *const u8,
-    bytes_len: u16,
-    signal: Signal<CriticalSectionRawMutex, Result<(), LwipError>>,
-}
-
-impl ResponseContext {
-    fn as_mut_ptr(&mut self) -> *mut c_void {
-        self as *mut _ as *mut c_void
-    }
-}
-
 pub struct TcpConnection<const N: usize> {
     pcb: AtomicPtr<lwip_pcb>,
     channel: Channel<CriticalSectionRawMutex, Option<PacketBuffer>, N>,
@@ -208,36 +143,20 @@ impl<const N: usize> TcpConnection<N> {
         }
     }
 
-    pub async fn attach_callbacks(self: Pin<&mut Self>) {
+    pub async fn attach_callbacks(self: Pin<&mut Self>) -> Result<(), LwipError> {
         let this = unsafe { self.get_unchecked_mut() };
-        let pcb = this.pcb.load(Ordering::Acquire);
-        if pcb.is_null() {
-            return;
-        }
-        let mut ctx = AttachContext {
-            pcb,
-            conn_ptr: this as *mut _ as *mut c_void,
-            signal: Signal::new(),
-        };
-        let err = unsafe { tcpip_callback(Self::_attach_callbacks, ctx.as_mut_ptr()) };
-        if err != LwipError::Ok {
-            return;
-        }
-        ctx.signal.wait().await;
-    }
-
-    unsafe extern "C" fn _attach_callbacks(ctx: *mut c_void) {
-        unsafe {
-            if ctx.is_null() {
-                return;
+        execute_in_tcpip_thread(|| unsafe {
+            let pcb = this.pcb.load(Ordering::Acquire);
+            if pcb.is_null() {
+                return Err(LwipError::Val);
             }
-            let ctx = &mut *(ctx as *mut AttachContext);
-            tcp_arg(ctx.pcb, ctx.conn_ptr);
-            tcp_recv(ctx.pcb, Some(Self::_recv));
-            tcp_err(ctx.pcb, Some(Self::_err));
-            tcp_sent(ctx.pcb, Some(Self::_sent));
-            ctx.signal.signal(true);
-        }
+            tcp_arg(pcb, this as *mut _ as *mut c_void);
+            tcp_recv(pcb, Some(Self::_recv));
+            tcp_err(pcb, Some(Self::_err));
+            tcp_sent(pcb, Some(Self::_sent));
+            Ok(())
+        })
+        .await
     }
 
     pub async fn receive(self: Pin<&Self>) -> Option<PacketBuffer> {
@@ -245,14 +164,14 @@ impl<const N: usize> TcpConnection<N> {
         let len = pkt.total_len();
         let pcb = self.pcb.load(Ordering::Acquire);
         if !pcb.is_null() {
-            unsafe {
-                sys_mutex_lock(&raw mut lock_tcpip_core);
-                let current_pcb = self.pcb.load(Ordering::Relaxed);
+            let _ = execute_in_tcpip_thread(|| unsafe {
+                let current_pcb = self.pcb.load(Ordering::Acquire);
                 if !current_pcb.is_null() {
                     tcp_recved(current_pcb, len);
                 }
-                sys_mutex_unlock(&raw mut lock_tcpip_core);
-            }
+                Ok(())
+            })
+            .await;
         }
         Some(pkt)
     }
@@ -261,41 +180,23 @@ impl<const N: usize> TcpConnection<N> {
         if bytes.len() > u16::MAX as usize {
             return Err(LwipError::Val);
         }
-        let pcb = self.pcb.load(Ordering::Acquire);
-        if pcb.is_null() {
-            return Err(LwipError::Mem);
-        }
-        let mut ctx = ResponseContext {
-            pcb,
-            bytes_ptr: bytes.as_ptr(),
-            bytes_len: bytes.len() as u16,
-            signal: Signal::new(),
-        };
-        let err = unsafe { tcpip_callback(Self::_send_response, ctx.as_mut_ptr()) };
-        if err != LwipError::Ok {
-            return Err(err);
-        }
-        ctx.signal.wait().await
-    }
 
-    unsafe extern "C" fn _send_response(ctx: *mut c_void) {
-        unsafe {
-            if ctx.is_null() {
-                return;
+        execute_in_tcpip_thread(|| unsafe {
+            let pcb = self.pcb.load(Ordering::Acquire);
+            if pcb.is_null() {
+                return Err(LwipError::Mem);
             }
-            let ctx = &mut *(ctx as *mut ResponseContext);
-            let err = tcp_write(ctx.pcb, ctx.bytes_ptr, ctx.bytes_len, TCP_WRITE_FLAG_COPY);
+            let err = tcp_write(pcb, bytes.as_ptr(), bytes.len() as u16, TCP_WRITE_FLAG_COPY);
             if err != LwipError::Ok {
-                ctx.signal.signal(Err(err));
-                return;
+                return Err(err);
             }
-            let err = tcp_output(ctx.pcb);
+            let err = tcp_output(pcb);
             if err != LwipError::Ok {
-                ctx.signal.signal(Err(err));
-                return;
+                return Err(err);
             }
-            ctx.signal.signal(Ok(()));
-        }
+            Ok(())
+        })
+        .await
     }
 
     unsafe extern "C" fn _recv(

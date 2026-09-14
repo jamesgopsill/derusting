@@ -148,8 +148,8 @@ async fn embassy_main(spawner: Spawner) {
 
     let tcp = TcpListener::<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>::new();
     let tcp = TCP.init(tcp);
-    if tcp.listen(TCP_PORT).await.is_err() {
-        log_critical!("TCP Failed");
+    if let Err(err) = tcp.listen(TCP_PORT).await {
+        log_critical!("TCP Failed: {err:?}");
         return;
     };
     log_info!("TCP up on {TCP_PORT}");
