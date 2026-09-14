@@ -5,24 +5,33 @@ use core::{
     ptr::{self},
 };
 
-use critical_section::Mutex;
-use embassy_futures::join::{join, join5};
+//use critical_section::Mutex;
+use embassy_executor::Spawner;
+use embassy_sync::{
+    blocking_mutex::Mutex, blocking_mutex::raw::ThreadModeRawMutex, channel::Channel,
+    mutex::Mutex as AsyncMutex,
+};
 use embassy_time_queue_utils::Queue;
+use heapless::LinearMap;
 use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
 use static_cell::StaticCell;
 
 use crate::{
     free_rtos::{
         alloc::FreeRtosAllocator,
-        bindings::{RtosTask, RtosTaskParams, vTaskDelay, xTaskGetCurrentTaskHandle},
+        bindings::{
+            RtosTask, RtosTaskParams, uxTaskGetStackHighWaterMark, vTaskDelay,
+            xPortGetFreeHeapSize, xTaskGetCurrentTaskHandle,
+        },
         executor::FreeRtosTaskExecutor,
         task::Task,
         time_driver::FreeRtosTimeDriver,
     },
+    kinds::{AddressBook, JobLedger},
     lwip::{tcp::TcpListener, udp::UdpSocket},
     marlin::{is_ready, set_offline},
     tasks::{
-        tcp::tcp_worker,
+        tcp::{broadcast_file, tcp_worker},
         udp::{address_book_lifetime_check, heartbeat, manage_ledger, udp_receiver},
     },
 };
@@ -32,6 +41,7 @@ extern crate alloc;
 mod free_rtos;
 mod fs;
 mod http;
+mod kinds;
 mod log;
 mod lwip;
 mod marlin;
@@ -102,37 +112,83 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
 
     let executor = EXECUTOR.init(FreeRtosTaskExecutor::new(current_task as _));
 
-    executor.run(|spawner| match embassy_main() {
+    executor.run(|spawner| match embassy_main(spawner) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     })
 }
 
+pub const ADDRESS_BOOK_ENTRIES: usize = 16;
+pub const UDP_CHANNEL_SIZE: usize = 8;
+pub const MAX_TCP_CONNECTIONS: usize = 1;
+pub const MAX_TCP_CONNECTION_CHANNEL_SIZE: usize = 8;
+
+static ADDRESS_BOOK: StaticCell<AddressBook<ADDRESS_BOOK_ENTRIES>> = StaticCell::new();
+static LEDGER: StaticCell<JobLedger> = StaticCell::new();
+static UDP: StaticCell<UdpSocket<UDP_CHANNEL_SIZE>> = StaticCell::new();
+static TCP: StaticCell<TcpListener<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>> =
+    StaticCell::new();
+static BROADCAST_GUID: Channel<ThreadModeRawMutex, uuid::Uuid, 2> = Channel::new();
+
 #[embassy_executor::task(pool_size = 1)]
-async fn embassy_main() {
-    let udp = UdpSocket::<6>::new();
-    let mut udp = core::pin::pin!(udp);
-    if udp.as_mut().listen(UDP_PORT).await.is_err() {
+async fn embassy_main(spawner: Spawner) {
+    log_stack_and_heap_size();
+    let address_book: AddressBook<ADDRESS_BOOK_ENTRIES> = AsyncMutex::new(LinearMap::new());
+    let address_book = ADDRESS_BOOK.init(address_book);
+    let ledger: JobLedger = AsyncMutex::new(None);
+    let ledger = LEDGER.init(ledger);
+
+    let udp = UdpSocket::<UDP_CHANNEL_SIZE>::new();
+    let udp = UDP.init(udp);
+    if udp.bind(UDP_PORT).await.is_err() {
         log_critical!("UDP failed");
         return;
     };
     log_info!("UDP up on {UDP_PORT}");
 
-    let tcp = TcpListener::<2, 8>::new();
-    let mut tcp = core::pin::pin!(tcp);
-    if tcp.as_mut().listen(TCP_PORT).await.is_err() {
+    let tcp = TcpListener::<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>::new();
+    let tcp = TCP.init(tcp);
+    if tcp.listen(TCP_PORT).await.is_err() {
         log_critical!("TCP Failed");
         return;
     };
     log_info!("TCP up on {TCP_PORT}");
 
-    let fut_01 = heartbeat(udp.as_ref());
-    let fut_02 = address_book_lifetime_check();
-    let fut_03 = udp_receiver(udp.as_ref());
-    let fut_04 = manage_ledger(udp.as_ref());
-    let fut_05 = tcp_worker(tcp.as_ref(), udp.as_ref());
-    let fut_06 = tcp_worker(tcp.as_ref(), udp.as_ref());
-    let fut = join5(fut_01, fut_02, fut_03, fut_04, fut_05);
-    let fut = join(fut, fut_06);
-    fut.await;
+    match heartbeat(udp, ledger) {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
+    }
+    match address_book_lifetime_check(address_book) {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
+    }
+    match manage_ledger(udp, address_book, ledger) {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
+    }
+    match udp_receiver(udp, address_book, ledger) {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
+    }
+    match tcp_worker(tcp, &BROADCAST_GUID) {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
+    }
+    match tcp_worker(tcp, &BROADCAST_GUID) {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
+    }
+    match broadcast_file(udp, address_book, ledger, &BROADCAST_GUID) {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
+    }
+}
+
+fn log_stack_and_heap_size() {
+    let free_stack_words = unsafe { uxTaskGetStackHighWaterMark(core::ptr::null_mut()) };
+    let free_stack_bytes = free_stack_words * core::mem::size_of::<usize>(); // 4 bytes on 32-bit ARM
+
+    log_info!("Stack: {} bytes, Heap: {}", free_stack_bytes, unsafe {
+        xPortGetFreeHeapSize()
+    });
 }

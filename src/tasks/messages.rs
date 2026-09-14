@@ -29,7 +29,7 @@ pub struct Chunk {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Ledger {
     pub owner: Ipv4Addr,
-    pub jobs: FnvIndexSet<Uuid, 16>,
+    pub jobs: FnvIndexSet<Uuid, 32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

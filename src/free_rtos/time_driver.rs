@@ -1,6 +1,7 @@
 use core::{cell::RefCell, sync::atomic::Ordering, task::Waker};
 
-use critical_section::Mutex;
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
+// use critical_section::Mutex;
 use embassy_time_driver::Driver;
 use embassy_time_queue_utils::Queue;
 use portable_atomic::{AtomicU32, AtomicU64};
@@ -12,7 +13,7 @@ use crate::free_rtos::bindings::*;
 pub struct FreeRtosTimeDriver {
     pub timekeeper: AtomicU64,
     pub free_rtos_now: AtomicU32,
-    pub queue: Mutex<RefCell<Queue>>,
+    pub queue: Mutex<CriticalSectionRawMutex, RefCell<Queue>>,
 }
 
 impl Driver for FreeRtosTimeDriver {
@@ -36,17 +37,25 @@ impl Driver for FreeRtosTimeDriver {
     /// Embassy has informed us of a new time to wake. Update our
     /// wake up time.
     fn schedule_wake(&self, at: u64, waker: &Waker) {
+        self.queue.lock(|queue| {
+            queue.borrow_mut().schedule_wake(at, waker);
+        })
+        /*
         critical_section::with(|cs| {
             let mut queue = self.queue.borrow(cs).borrow_mut();
             queue.schedule_wake(at, waker);
         })
+        */
     }
 }
 
 impl FreeRtosTimeDriver {
     pub fn next_expiration(&self) -> u64 {
         let now = self.now();
-        critical_section::with(|cs| self.queue.borrow(cs).borrow_mut().next_expiration(now))
+        self.queue
+            .lock(|queue| queue.borrow_mut().next_expiration(now))
+
+        // critical_section::with(|cs| self.queue.borrow(cs).borrow_mut().next_expiration(now))
     }
 
     pub fn wait_for_interrupt_or_timeout(&self) {

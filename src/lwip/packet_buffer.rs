@@ -55,7 +55,7 @@ impl PacketBuffer {
         }
         let payload_ptr = unsafe { (*pbuf).payload };
         let payload = unsafe { core::slice::from_raw_parts_mut(payload_ptr, size) };
-        if let Err(_) = postcard::to_slice(&msg, payload) {
+        if postcard::to_slice(&msg, payload).is_err() {
             log_error!("Serialization error");
             unsafe { pbuf_free(pbuf) };
             return None;

@@ -170,6 +170,8 @@ unsafe extern "C" {
     /// Sets the custom program argument (void*) that will be passed to all callbacks for this PCB.
     pub(super) fn tcp_arg(pcb: *mut lwip_pcb, arg: *mut c_void);
 
+    pub(super) fn tcp_abort(pcb: *mut lwip_pcb);
+
     // --- TCP Callbacks ---
 
     /// Registers a callback to be called when a new connection is accepted on a listening PCB.
@@ -268,5 +270,5 @@ unsafe extern "C" {
     pub(super) fn tcpip_callback(
         callback: unsafe extern "C" fn(ctx: *mut c_void),
         ctx: *mut c_void,
-    );
+    ) -> LwipError;
 }

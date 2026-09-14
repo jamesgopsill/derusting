@@ -1,6 +1,12 @@
-use core::{ffi::c_void, marker::PhantomPinned, net::Ipv4Addr, pin::Pin};
+use core::{
+    ffi::c_void,
+    net::Ipv4Addr,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel, signal::Signal};
+use embassy_sync::{
+    blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
+};
 
 use crate::{
     log_error,
@@ -10,7 +16,7 @@ use crate::{
 struct ListenContext {
     port: u16,
     socket_ptr: *mut c_void,
-    signal: Signal<ThreadModeRawMutex, Result<*mut lwip_pcb, LwipError>>,
+    signal: Signal<CriticalSectionRawMutex, Result<*mut lwip_pcb, LwipError>>,
 }
 
 impl ListenContext {
@@ -23,7 +29,7 @@ struct BroadcastContext {
     pcb: *mut lwip_pcb,
     port: u16,
     pbuf: PacketBuffer,
-    signal: Signal<ThreadModeRawMutex, Result<(), LwipError>>,
+    signal: Signal<CriticalSectionRawMutex, Result<(), LwipError>>,
 }
 
 impl BroadcastContext {
@@ -33,44 +39,52 @@ impl BroadcastContext {
 }
 
 pub struct UdpSocket<const N: usize> {
-    pcb: *mut lwip_pcb,
-    channel: Channel<ThreadModeRawMutex, (Ipv4Addr, PacketBuffer), N>,
-    _pin: PhantomPinned,
+    pcb: AtomicPtr<lwip_pcb>,
+    channel: Channel<CriticalSectionRawMutex, (Ipv4Addr, PacketBuffer), N>,
 }
+
+unsafe impl<const N: usize> Sync for UdpSocket<N> {}
+unsafe impl<const N: usize> Send for UdpSocket<N> {}
 
 impl<const N: usize> UdpSocket<N> {
     pub fn new() -> Self {
         Self {
-            pcb: core::ptr::null_mut(),
+            pcb: AtomicPtr::new(core::ptr::null_mut()),
             channel: Channel::new(),
-            _pin: PhantomPinned,
         }
     }
 
-    pub fn as_mut_ptr(&mut self) -> *mut c_void {
-        self as *mut _ as *mut c_void
+    fn as_mut_ptr(&'static self) -> *mut c_void {
+        self as *const _ as *mut c_void
     }
 
-    pub async fn listen(self: Pin<&mut Self>, port: u16) -> Result<(), LwipError> {
-        let this = unsafe { self.get_unchecked_mut() };
-        let mut ctx = ListenContext {
+    pub async fn bind(&'static self, port: u16) -> Result<(), LwipError> {
+        let ctx = ListenContext {
             port,
-            socket_ptr: this.as_mut_ptr(),
+            socket_ptr: self.as_mut_ptr(),
             signal: Signal::new(),
         };
-        unsafe { tcpip_callback(Self::_listen, ctx.as_mut_ptr()) };
+        let mut ctx = core::pin::pin!(ctx);
+        let err = unsafe { tcpip_callback(Self::_bind, ctx.as_mut_ptr()) };
+        if err != LwipError::Ok {
+            return Err(err);
+        }
         let pcb = ctx.signal.wait().await?;
-        this.pcb = pcb;
+        self.pcb.store(pcb, Ordering::Release);
         Ok(())
     }
 
-    unsafe extern "C" fn _listen(ctx: *mut c_void) {
+    unsafe extern "C" fn _bind(ctx: *mut c_void) {
         unsafe {
             if ctx.is_null() {
                 return;
             }
             let ctx = &mut *(ctx as *mut ListenContext);
             let pcb = udp_new();
+            if pcb.is_null() {
+                ctx.signal.signal(Err(LwipError::Mem));
+                return;
+            }
             let err = udp_bind(pcb, &ip_addr_any, ctx.port);
             if err != LwipError::Ok {
                 udp_remove(pcb);
@@ -82,21 +96,22 @@ impl<const N: usize> UdpSocket<N> {
         }
     }
 
-    pub async fn broadcast(
-        self: Pin<&Self>,
-        pbuf: PacketBuffer,
-        port: u16,
-    ) -> Result<(), LwipError> {
-        if self.pcb.is_null() {
+    pub async fn broadcast(&'static self, pbuf: PacketBuffer, port: u16) -> Result<(), LwipError> {
+        let pcb = self.pcb.load(Ordering::Acquire);
+        if pcb.is_null() {
             return Err(LwipError::Val);
         }
-        let mut ctx = BroadcastContext {
-            pcb: self.pcb,
+        let ctx = BroadcastContext {
+            pcb,
             port,
             pbuf,
             signal: Signal::new(),
         };
-        unsafe { tcpip_callback(Self::_broadcast, ctx.as_mut_ptr()) };
+        let mut ctx = core::pin::pin!(ctx);
+        let err = unsafe { tcpip_callback(Self::_broadcast, ctx.as_mut_ptr()) };
+        if err != LwipError::Ok {
+            return Err(err);
+        }
         ctx.signal.wait().await
     }
 
@@ -122,7 +137,7 @@ impl<const N: usize> UdpSocket<N> {
         }
     }
 
-    pub async fn with_packet<F>(self: Pin<&Self>, fcn: F)
+    pub async fn with_packet<F>(&'static self, fcn: F)
     where
         F: AsyncFnOnce((Ipv4Addr, PacketBuffer)),
     {
@@ -144,6 +159,7 @@ impl<const N: usize> UdpSocket<N> {
         let sock = unsafe { &*(arg as *const UdpSocket<N>) };
 
         let Ok(pb) = PacketBuffer::try_from(pbuf) else {
+            unsafe { pbuf_free(pbuf) };
             return;
         };
 
@@ -160,8 +176,9 @@ impl<const N: usize> Drop for UdpSocket<N> {
     fn drop(&mut self) {
         unsafe {
             sys_mutex_lock(&raw mut lock_tcpip_core);
-            udp_recv(self.pcb, None, core::ptr::null_mut());
-            udp_remove(self.pcb);
+            let pcb = self.pcb.swap(core::ptr::null_mut(), Ordering::AcqRel);
+            udp_recv(pcb, None, core::ptr::null_mut());
+            udp_remove(pcb);
             sys_mutex_unlock(&raw mut lock_tcpip_core);
         }
     }

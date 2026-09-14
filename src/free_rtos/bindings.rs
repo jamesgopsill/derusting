@@ -84,4 +84,10 @@ unsafe extern "C" {
 
     /// Exit a critical section.
     pub fn vPortExitCritical();
+
+    // Free heap size.
+    pub fn xPortGetFreeHeapSize() -> usize;
+
+    // Stack size
+    pub fn uxTaskGetStackHighWaterMark(task_handle: *mut core::ffi::c_void) -> usize;
 }
