@@ -7,10 +7,7 @@ use core::{
 
 //use critical_section::Mutex;
 use embassy_executor::Spawner;
-use embassy_sync::{
-    blocking_mutex::Mutex, blocking_mutex::raw::ThreadModeRawMutex, channel::Channel,
-    mutex::Mutex as AsyncMutex,
-};
+use embassy_sync::{blocking_mutex::Mutex, mutex::Mutex as AsyncMutex};
 use embassy_time_queue_utils::Queue;
 use heapless::LinearMap;
 use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
@@ -31,7 +28,7 @@ use crate::{
     lwip::{tcp::TcpListener, udp::UdpSocket},
     marlin::{is_ready, set_offline},
     tasks::{
-        tcp::{broadcast_file, tcp_worker},
+        tcp::tcp_worker,
         udp::{address_book_lifetime_check, heartbeat, manage_ledger, udp_receiver},
     },
 };
@@ -78,8 +75,7 @@ pub unsafe extern "C" fn derusting_main() {
     log_info!("derusting_main()");
     match Task::try_from(&TASK) {
         Ok(_) => log_info!("Embassy has been created"),
-        // No task (i.e., null ptr) so create it (7 max)
-        Err(_) => match Task::new(c"Embassy", 512 * 4, 1, embassy) {
+        Err(_) => match Task::new(c"Embassy", 512 * 6, 1, embassy) {
             Ok(t) => {
                 log_info!("Embassy task created.");
                 TASK.store(t.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
@@ -118,36 +114,32 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
     })
 }
 
-pub const ADDRESS_BOOK_ENTRIES: usize = 16;
+pub const ADDRESS_BOOK_ENTRIES: usize = 32;
 pub const UDP_CHANNEL_SIZE: usize = 8;
 pub const MAX_TCP_CONNECTIONS: usize = 1;
 pub const MAX_TCP_CONNECTION_CHANNEL_SIZE: usize = 8;
 
-static ADDRESS_BOOK: StaticCell<AddressBook<ADDRESS_BOOK_ENTRIES>> = StaticCell::new();
-static LEDGER: StaticCell<JobLedger> = StaticCell::new();
+static ADDRESS_BOOK: AddressBook<ADDRESS_BOOK_ENTRIES> = AsyncMutex::new(LinearMap::new());
+static JOB_LEDGER: JobLedger = AsyncMutex::new(None);
 static UDP: StaticCell<UdpSocket<UDP_CHANNEL_SIZE>> = StaticCell::new();
 static TCP: StaticCell<TcpListener<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>> =
     StaticCell::new();
-static BROADCAST_GUID: Channel<ThreadModeRawMutex, uuid::Uuid, 2> = Channel::new();
 
 #[embassy_executor::task(pool_size = 1)]
 async fn embassy_main(spawner: Spawner) {
     log_stack_and_heap_size();
-    let address_book: AddressBook<ADDRESS_BOOK_ENTRIES> = AsyncMutex::new(LinearMap::new());
-    let address_book = ADDRESS_BOOK.init(address_book);
-    let ledger: JobLedger = AsyncMutex::new(None);
-    let ledger = LEDGER.init(ledger);
+    let address_book = &ADDRESS_BOOK;
+    let ledger = &JOB_LEDGER;
 
-    let udp = UdpSocket::<UDP_CHANNEL_SIZE>::new();
-    let udp = UDP.init(udp);
+    let udp = UDP.init_with(UdpSocket::<UDP_CHANNEL_SIZE>::new);
     if udp.bind(UDP_PORT).await.is_err() {
         log_critical!("UDP failed");
         return;
     };
     log_info!("UDP up on {UDP_PORT}");
 
-    let tcp = TcpListener::<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>::new();
-    let tcp = TCP.init(tcp);
+    let tcp =
+        TCP.init_with(TcpListener::<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>::new);
     if let Err(err) = tcp.listen(TCP_PORT).await {
         log_critical!("TCP Failed: {err:?}");
         return;
@@ -170,17 +162,11 @@ async fn embassy_main(spawner: Spawner) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     }
-    match tcp_worker(tcp, &BROADCAST_GUID) {
-        Ok(t) => spawner.spawn(t),
-        Err(e) => log_error!("Spawn Error: {e}"),
-    }
-    match tcp_worker(tcp, &BROADCAST_GUID) {
-        Ok(t) => spawner.spawn(t),
-        Err(e) => log_error!("Spawn Error: {e}"),
-    }
-    match broadcast_file(udp, address_book, ledger, &BROADCAST_GUID) {
-        Ok(t) => spawner.spawn(t),
-        Err(e) => log_error!("Spawn Error: {e}"),
+    for _ in 0..1 {
+        match tcp_worker(tcp, udp, address_book, ledger) {
+            Ok(t) => spawner.spawn(t),
+            Err(e) => log_error!("Spawn Error: {e}"),
+        }
     }
 }
 

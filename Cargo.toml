@@ -13,6 +13,9 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+[lints.clippy]
+# large_stack_frames = "warn"
+
 [dependencies]
 const_format = "0.2"
 cortex-m = {
@@ -58,7 +61,6 @@ serde = {
   default-features = false,
   features = ["derive"]
 }
-serde-big-array = "0.5"
 thiserror = {
   version = "2",
   default-features = false

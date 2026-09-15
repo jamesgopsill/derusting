@@ -2,7 +2,6 @@ use core::net::Ipv4Addr;
 
 use heapless::index_set::FnvIndexSet;
 use serde::{Deserialize, Serialize};
-use serde_big_array::BigArray;
 use uuid::Uuid;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -17,30 +16,33 @@ pub struct NewJob {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Chunk {
+pub struct Chunk<'a> {
     pub guid: Uuid,
     pub chunk_id: u16,
     pub last_chunk: bool,
     pub len: u16,
-    #[serde(with = "BigArray")]
-    pub chunk: [u8; 768],
+    // Note. limiting to 768 for now
+    // as the pack is 1024 in size.
+    #[serde(borrow)]
+    pub chunk: &'a [u8],
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Ledger {
     pub owner: Ipv4Addr,
-    pub jobs: FnvIndexSet<Uuid, 32>,
+    pub jobs: FnvIndexSet<Uuid, 16>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum NetworkMessage {
+pub enum NetworkMessage<'a> {
     Heartbeat(Heartbeat),
     NewJob(NewJob),
-    Chunk(Chunk),
+    #[serde(borrow)]
+    Chunk(Chunk<'a>),
     Ledger(Ledger),
 }
 
-impl NetworkMessage {
+impl<'a> NetworkMessage<'a> {
     pub fn heartbeat(has_ledger: bool) -> Self {
         Self::Heartbeat(Heartbeat {
             alive: true,

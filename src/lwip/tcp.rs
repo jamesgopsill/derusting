@@ -82,6 +82,13 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
         // is called.
         let listener = unsafe { &*(arg as *const TcpListener<N, M>) };
 
+        // 1. Tell lwIP to refuse & buffer incoming packets on this PCB
+        //    until the application task attaches its real receiver.
+        unsafe {
+            tcp_arg(pcb, core::ptr::null_mut());
+            tcp_recv(pcb, Some(Self::_hold_recv));
+        }
+
         if listener.channel.try_send(pcb).is_err() {
             log_error!("TCP Listener Channel Full");
             unsafe { tcp_abort(pcb) };
@@ -89,6 +96,20 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
         };
 
         LwipError::Ok
+    }
+
+    /// Temporary receiver installed while the PCB is waiting for
+    /// the stack-allocated `TcpConnection` to be created and pinned.
+    unsafe extern "C" fn _hold_recv(
+        _arg: *mut c_void,
+        _pcb: *mut lwip_pcb,
+        _pbuf: *mut lwip_pbuf,
+        _err: LwipError,
+    ) -> LwipError {
+        log_info!("_hold_recv: refusing data until conn is pinned");
+        // Telling lwIP ERR_MEM instructs it to store the pbuf
+        // in `pcb->refused_data` instead of discarding it!
+        LwipError::Mem
     }
 
     pub async fn with_connection<F>(&'static self, fcn: F)
@@ -144,6 +165,7 @@ impl<const N: usize> TcpConnection<N> {
     }
 
     pub async fn attach_callbacks(self: Pin<&mut Self>) -> Result<(), LwipError> {
+        log_info!("Attaching Callbacks");
         let this = unsafe { self.get_unchecked_mut() };
         execute_in_tcpip_thread(|| unsafe {
             let pcb = this.pcb.load(Ordering::Acquire);
@@ -154,6 +176,7 @@ impl<const N: usize> TcpConnection<N> {
             tcp_recv(pcb, Some(Self::_recv));
             tcp_err(pcb, Some(Self::_err));
             tcp_sent(pcb, Some(Self::_sent));
+            tcp_process_refused_data(pcb);
             Ok(())
         })
         .await

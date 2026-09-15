@@ -271,4 +271,6 @@ unsafe extern "C" {
         callback: unsafe extern "C" fn(ctx: *mut c_void),
         ctx: *mut c_void,
     ) -> LwipError;
+
+    pub(super) fn tcp_process_refused_data(pcb: *mut lwip_pcb) -> LwipError;
 }

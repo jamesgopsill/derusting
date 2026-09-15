@@ -20,6 +20,7 @@ unsafe impl<const N: usize> Sync for UdpSocket<N> {}
 unsafe impl<const N: usize> Send for UdpSocket<N> {}
 
 impl<const N: usize> UdpSocket<N> {
+    /// Create a new instance of UDP socket.
     pub fn new() -> Self {
         Self {
             pcb: AtomicPtr::new(core::ptr::null_mut()),
@@ -27,10 +28,16 @@ impl<const N: usize> UdpSocket<N> {
         }
     }
 
-    fn as_mut_ptr(&'static self) -> *mut c_void {
+    /// An internal function to create a pointer to `self`
+    /// that is used to set up the LWIP callbacks. `self` needs
+    /// to be `static` (i.e., pinned in memory) to prevent
+    /// undefined behaviour as the lwip callbacks will expect it to
+    /// be pinned in memory which static provides.
+    fn as_mut_ptr(&self) -> *mut c_void {
         self as *const _ as *mut c_void
     }
 
+    /// Binds a `UDPSocket<N>` to a port to receive data on.
     pub async fn bind(&'static self, port: u16) -> Result<(), LwipError> {
         execute_in_tcpip_thread(|| unsafe {
             let pcb = udp_new();
@@ -39,7 +46,7 @@ impl<const N: usize> UdpSocket<N> {
             }
             let err = udp_bind(pcb, &ip_addr_any, port);
             if err == LwipError::Ok {
-                udp_recv(pcb, Some(Self::recv), self.as_mut_ptr());
+                udp_recv(pcb, Some(Self::_recv), self.as_mut_ptr());
                 self.pcb.store(pcb, Ordering::Release);
                 Ok(())
             } else {
@@ -50,11 +57,8 @@ impl<const N: usize> UdpSocket<N> {
         .await
     }
 
-    pub async fn broadcast(
-        &'static self,
-        mut pbuf: PacketBuffer,
-        port: u16,
-    ) -> Result<(), LwipError> {
+    /// Broadcast a `PacketBuffer` across UDP.
+    pub async fn broadcast(&self, mut pbuf: PacketBuffer, port: u16) -> Result<(), LwipError> {
         execute_in_tcpip_thread(|| unsafe {
             let pcb = self.pcb.load(Ordering::Acquire);
             if pcb.is_null() {
@@ -72,15 +76,13 @@ impl<const N: usize> UdpSocket<N> {
         .await
     }
 
-    pub async fn with_packet<F>(&'static self, fcn: F)
-    where
-        F: AsyncFnOnce((Ipv4Addr, PacketBuffer)),
-    {
-        let packet = self.channel.receive().await;
-        fcn(packet).await;
+    /// Handle a packet the has been received in the UDP port
+    pub async fn receive(&'static self) -> (Ipv4Addr, PacketBuffer) {
+        self.channel.receive().await
     }
 
-    unsafe extern "C" fn recv(
+    /// The callback handler for receiving UPD packets.
+    unsafe extern "C" fn _recv(
         arg: *mut c_void,
         _pcb: *mut lwip_pcb,
         pbuf: *mut lwip_pbuf,
@@ -94,7 +96,7 @@ impl<const N: usize> UdpSocket<N> {
         let sock = unsafe { &*(arg as *const UdpSocket<N>) };
 
         let Ok(pb) = PacketBuffer::try_from(pbuf) else {
-            unsafe { pbuf_free(pbuf) };
+            // Should only fail if the pbuf is null
             return;
         };
 

@@ -6,5 +6,6 @@ use heapless::LinearMap;
 
 use crate::tasks::messages::Ledger;
 
-pub type AddressBook<const N: usize> = Mutex<ThreadModeRawMutex, LinearMap<Ipv4Addr, Instant, N>>;
+pub type AddressBook<const N: usize> =
+    Mutex<ThreadModeRawMutex, LinearMap<Ipv4Addr, (Instant, bool), N>>;
 pub type JobLedger = Mutex<ThreadModeRawMutex, Option<Ledger>>;

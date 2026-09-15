@@ -1,6 +1,6 @@
 use core::pin::Pin;
 
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::Channel};
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, mutex::Mutex};
 use embassy_time::Timer;
 use embedded_io::{Read as _, Write as _};
 use uuid::Uuid;
@@ -29,21 +29,25 @@ use crate::{
 #[embassy_executor::task(pool_size = 2)]
 pub async fn tcp_worker(
     tcp: &'static TcpListener<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>,
-    guids: &'static Channel<ThreadModeRawMutex, Uuid, 2>,
+    udp: &'static UdpSocket<UDP_CHANNEL_SIZE>,
+    address_book: &'static AddressBook<ADDRESS_BOOK_ENTRIES>,
+    ledger: &'static JobLedger,
 ) {
     loop {
-        tcp.with_connection(async |conn| handle_conn(conn, guids).await)
+        tcp.with_connection(async |conn| handle_conn(conn, udp, address_book, ledger).await)
             .await
     }
 }
 
 /// A task that handles TCP requests for the printer. There is only `GET /` and `PUT /` to
 /// retrieve the submission and put files onto the network for processing.
-pub async fn handle_conn(
-    conn: Pin<&mut TcpConnection<MAX_TCP_CONNECTION_CHANNEL_SIZE>>,
-    guids: &'static Channel<ThreadModeRawMutex, Uuid, 2>,
+pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
+    conn: Pin<&mut TcpConnection<N1>>,
+    udp: &UdpSocket<N2>,
+    address_book: &AddressBook<N3>,
+    ledger: &JobLedger,
 ) {
-    log_info!("New Task");
+    log_info!("Handling TCP Connection");
     let Some(pbuf) = conn.as_ref().receive().await else {
         log_error!("Handle Closed");
         return;
@@ -133,9 +137,9 @@ pub async fn handle_conn(
             fs::rname(&path, &new_path);
             let _ = conn.response(OK.as_bytes()).await;
 
-            if guids.try_send(guid).is_err() {
-                log_info!("Too many files to process");
-            };
+            append_to_ledger(guid, address_book, ledger, udp).await;
+
+            broadcast_file(guid, address_book, udp).await;
         }
     }
 }
@@ -185,129 +189,138 @@ fn check_start_line(start_line: &str) -> Result<Method, &'static str> {
 /// Analyses the PUT header to ensure it features the information
 /// we require to process the request.
 fn check_put_header(headers: &str) -> Result<usize, &'static str> {
-    let mut content_length: usize = 0;
-    let mut content_type: bool = false;
+    let mut content_length = None;
+    let mut content_type_ok = false;
+
     for line in headers.lines() {
-        let Some((key, val)) = line.split_once(":") else {
+        let Some((key, val)) = line.split_once(':') else {
             return Err(BAD_REQUEST);
         };
-        match key {
-            "content-length" => {
-                let Ok(val) = val.trim().parse::<usize>() else {
-                    log_error!("Could not parse content-length");
-                    return Err(BAD_REQUEST);
-                };
-                content_length = val;
-            }
-            "Content-Length" => {
-                let Ok(val) = val.trim().parse::<usize>() else {
-                    return Err(BAD_REQUEST);
-                };
-                content_length = val;
-            }
-            "content-type" =>
-            {
-                #[allow(clippy::collapsible_match)]
-                if val.trim() == "text/x.gcode" {
-                    content_type = true;
-                }
-            }
-            "Content-Type" =>
-            {
-                #[allow(clippy::collapsible_match)]
-                if val.trim() == "text/x.gcode" {
-                    content_type = true;
-                }
-            }
-            _ => {}
+        let key = key.trim();
+        let val = val.trim();
+
+        if key.eq_ignore_ascii_case("content-length") {
+            content_length = val.parse::<usize>().ok();
+        } else if key.eq_ignore_ascii_case("content-type") && val == "text/x.gcode" {
+            content_type_ok = true;
         }
     }
 
-    if !content_type {
+    let len = content_length.ok_or(BAD_REQUEST)?;
+    if !content_type_ok || len == 0 || len > 1_000_000 {
         return Err(BAD_REQUEST);
     }
 
-    if content_length == 0 {
-        return Err(BAD_REQUEST);
-    }
-
-    if content_length > 1_000_000 {
-        return Err(BAD_REQUEST);
-    }
-
-    Ok(content_length)
+    Ok(len)
 }
 
-#[embassy_executor::task(pool_size = 1)]
-pub async fn broadcast_file(
-    udp: &'static UdpSocket<UDP_CHANNEL_SIZE>,
-    address_book: &'static AddressBook<ADDRESS_BOOK_ENTRIES>,
-    ledger: &'static JobLedger,
-    guids: &'static Channel<ThreadModeRawMutex, Uuid, 2>,
+async fn append_to_ledger<const N1: usize, const N2: usize>(
+    guid: Uuid,
+    address_book: &AddressBook<N1>,
+    ledger: &JobLedger,
+    udp: &UdpSocket<N2>,
 ) {
-    loop {
-        let guid = guids.receive().await;
-        let path = make_path(&guid, false);
-        // Append to the ledger or send our new job request...
-        // Communicate the new job across the network
-        // Send the msg 5 times just in case of drop outs.
-        // Can I zero copy and re-use a pbuf?
-        let address_book_is_empty = {
-            let guard = address_book.lock().await;
-            guard.is_empty()
-        };
-        if let Some(ledge) = ledger.lock().await.as_mut() {
+    // Append to the ledger or send our new job request...
+    // Communicate the new job across the network
+    // Send the msg N times just in case of drop outs.
+    // Can I zero copy and re-use a pbuf?
+    let address_book_is_empty = {
+        let guard = address_book.lock().await;
+        guard.is_empty()
+    };
+
+    let is_owner = {
+        let mut guard = ledger.lock().await;
+        if let Some(ledge) = guard.as_mut() {
             log_info!("I own the ledger. Adding the file");
             let _ = ledge.jobs.insert(guid);
+            true
         } else {
-            // OPTMISATION: If there are other machines to send to
-            if !address_book_is_empty {
-                let msg = NetworkMessage::new_job(guid);
-                for _i in 0..5 {
-                    if let Some(pbuf) = PacketBuffer::alloc(&msg) {
-                        if udp.broadcast(pbuf, UDP_PORT).await.is_err() {
-                            log_error!("Broadcasting job failed.");
-                        } else {
-                            log_info!("Job message sent");
-                        }
-                    }
-                    Timer::after_millis(200).await;
-                }
-            }
+            false
         }
-        // Now open, read and send the file chunks to propogate
-        // it through the network. Only if there are machines
-        // to broadcast to.
-        if !address_book_is_empty {
-            let mut n: usize = 0;
-            let mut len: usize = usize::MAX;
-            if let Ok(mut f) = fs::open(&path, ReadBytes) {
-                n += 1;
-                let mut bytes = [0u8; 768];
-                while len != 0 {
-                    log_info!("Sending: {n}");
-                    if let Ok(l) = f.read(&mut bytes) {
-                        len = l;
-                        let chunk = Chunk {
-                            guid,
-                            chunk_id: n as u16,
-                            last_chunk: len == 0,
-                            len: len as u16,
-                            chunk: bytes,
-                        };
-                        let msg = NetworkMessage::Chunk(chunk);
-                        // Send a repeated set of messages
-                        for _i in 0..3 {
-                            if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                                && udp.broadcast(pbuf, UDP_PORT).await.is_err()
-                            {
-                                log_error!("Broadcasting job chunk failed.");
-                            }
-                            Timer::after_millis(200).await;
-                        }
+    };
+
+    if !is_owner && !address_book_is_empty {
+        for _ in 0..3 {
+            // Scope `msg` so it does not persist across `Timer::after_millis`
+            {
+                let msg = NetworkMessage::new_job(guid);
+                if let Some(pbuf) = PacketBuffer::alloc(&msg) {
+                    if udp.broadcast(pbuf, UDP_PORT).await.is_err() {
+                        log_error!("Broadcasting job failed.");
+                    } else {
+                        log_info!("Job message sent");
                     }
                 }
             }
+            Timer::after_millis(200).await;
+        }
+    }
+}
+
+static BROADCAST_BUF: Mutex<ThreadModeRawMutex, [u8; 768]> = Mutex::new([0u8; 768]);
+
+async fn broadcast_file<const N1: usize, const N2: usize>(
+    guid: Uuid,
+    address_book: &AddressBook<N1>,
+    udp: &UdpSocket<N2>,
+) {
+    // Now open, read and send the file chunks to propogate
+    // it through the network. Only if there are machines
+    // to broadcast to.
+    let address_book_is_empty = {
+        let guard = address_book.lock().await;
+        guard.is_empty()
+    };
+    if address_book_is_empty {
+        return;
+    }
+
+    let path = make_path(&guid, false);
+
+    let Ok(mut f) = fs::open(&path, ReadBytes) else {
+        log_error!("Failed to open file for broadcast");
+        return;
+    };
+
+    let mut chunk_id: u16 = 0;
+    let mut buf = BROADCAST_BUF.lock().await;
+
+    loop {
+        let bytes_read = match f.read(buf.as_mut_slice()) {
+            Ok(n) => n,
+            Err(e) => {
+                log_error!("File read error: {e:?}");
+                break;
+            }
+        };
+
+        chunk_id += 1;
+        let eof = bytes_read == 0;
+
+        for _ in 0..3 {
+            // Scope chunk/msg so they are destroyed before the 200 ms sleep
+            {
+                let chunk = Chunk {
+                    guid,
+                    chunk_id,
+                    last_chunk: eof,
+                    len: bytes_read as u16,
+                    chunk: &buf[..bytes_read],
+                };
+                let msg = NetworkMessage::Chunk(chunk);
+
+                if let Some(pbuf) = PacketBuffer::alloc(&msg) {
+                    if udp.broadcast(pbuf, UDP_PORT).await.is_err() {
+                        log_error!("Broadcasting job chunk failed.");
+                    }
+                }
+            }
+            Timer::after_millis(200).await;
+        }
+
+        if eof {
+            break;
         }
     }
 }
