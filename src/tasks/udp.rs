@@ -3,17 +3,16 @@ use core::net::Ipv4Addr;
 use alloc::string::ToString as _;
 use embassy_time::{Instant, Timer};
 use embedded_io::Write as _;
-use heapless::CString;
 use heapless::index_set::FnvIndexSet;
+use heapless::{CString, HistoryBuf};
 use uuid::Uuid;
 
 use crate::fs::{self, File, ReadBytes, WriteBytes};
 use crate::kinds::{AddressBook, JobLedger};
 use crate::lwip::my_ipaddr;
-use crate::lwip::packet_buffer::PacketBuffer;
 use crate::lwip::udp::UdpSocket;
-use crate::tasks::messages::{Chunk, Ledger, NetworkMessage};
-use crate::{ADDRESS_BOOK_ENTRIES, UDP_CHANNEL_SIZE, UDP_PORT, marlin};
+use crate::tasks::messages::{Chunk, Ledger, Message, Payload};
+use crate::{ADDRESS_BOOK_ENTRIES, UDP_CHANNEL_SIZE, marlin};
 use crate::{log_error, log_info};
 
 /// This task broadcasts a heartbeat to the network to inform
@@ -26,11 +25,7 @@ pub async fn heartbeat(udp: &'static UdpSocket<UDP_CHANNEL_SIZE>) {
         } else {
             log_info!("[Unknown] heartbeat()");
         }
-        if let Some(pbuf) = PacketBuffer::alloc(NetworkMessage::heartbeat())
-            && udp.broadcast(pbuf, UDP_PORT).await.is_err()
-        {
-            log_error!("Broadcast failed.");
-        }
+        Message::send_heartbeat(udp).await;
         Timer::after_secs(5).await;
     }
 }
@@ -133,6 +128,8 @@ pub async fn udp_receiver(
 ) {
     log_info!("Ready to receive UDP packets");
     let mut file_transfer = FileTransferTask::new();
+    // Holds the last 12 unique message idempotencies
+    let mut history: HistoryBuf<Uuid, 12> = HistoryBuf::new();
     loop {
         let (addr, packet) = udp.receive().await;
         log_info!("Received packet from: {addr}");
@@ -141,12 +138,18 @@ pub async fn udp_receiver(
             continue;
         };
 
-        let Ok(msg) = postcard::from_bytes::<NetworkMessage>(msg) else {
+        let Ok(msg) = postcard::from_bytes::<Message>(msg) else {
             log_error!("Packet Deserialization failed");
             continue;
         };
 
-        if let NetworkMessage::Heartbeat(_hb) = msg {
+        if history.contains(&msg.idempotency) {
+            // Already processed it recently
+            continue;
+        }
+        history.write(msg.idempotency);
+
+        if let Payload::Heartbeat(_hb) = msg.payload {
             let mut book = address_book.lock().await;
             if let Err(e) = book.insert(addr, Instant::now()) {
                 log_error!("Address book error: {e:?}");
@@ -154,7 +157,7 @@ pub async fn udp_receiver(
             continue;
         }
 
-        if let NetworkMessage::NewJob(new_job) = msg {
+        if let Payload::NewJob(new_job) = msg.payload {
             // At the moment, all add it but could only the
             // owner really needs to do it in this format.
             // But will be good if we need to assign a new owner
@@ -172,14 +175,14 @@ pub async fn udp_receiver(
         // TODO: We need to include the uuid of the job as multiple jobs
         // at the same time might interfere with one another.
         // NOTE: Future me, improve to handle multiple files at the same.
-        if let NetworkMessage::Chunk(chunk) = msg {
+        if let Payload::Chunk(chunk) = msg.payload {
             file_transfer.digest(chunk);
             continue;
         }
 
         // Update the ledger I have to maintain sync. Only the owner
         // should be sending this message out.
-        if let NetworkMessage::Ledger(sent_ledger) = msg {
+        if let Payload::Ledger(sent_ledger) = msg.payload {
             let mut l = ledger.lock().await;
             *l = Some(sent_ledger);
         }
@@ -229,17 +232,7 @@ pub async fn manage_ledger(
                 jobs: FnvIndexSet::new(),
             };
             *ledger_guard = Some(ledger.clone());
-            let msg = NetworkMessage::Ledger(ledger);
-            drop(ledger_guard);
-            // Tell anyone who has joined that I have it.
-            for _i in 0..2 {
-                if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                    && udp.broadcast(pbuf, UDP_PORT).await.is_err()
-                {
-                    log_error!("Broadcast failed.");
-                }
-                Timer::after_millis(200).await;
-            }
+            Message::send_ledger(ledger, udp).await;
             continue;
         }
 
@@ -279,19 +272,8 @@ pub async fn manage_ledger(
         }
 
         if book_guard.is_empty() {
-            log_info!("It's only me - keeping ledger");
-            let msg = NetworkMessage::Ledger(ledger.clone());
-            drop(ledger_guard);
-            // Tell the other machines I have it anyway. Help
-            // maintain synchronicity.
-            for _i in 0..2 {
-                if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                    && udp.broadcast(pbuf, UDP_PORT).await.is_err()
-                {
-                    log_error!("Broadcast failed.");
-                }
-                Timer::after_millis(200).await;
-            }
+            log_info!("It's only me - keeping ledger - and telling everyone.");
+            Message::send_ledger(ledger.clone(), udp).await;
             continue;
         }
 
@@ -315,16 +297,7 @@ pub async fn manage_ledger(
             ledger.owner = *min_addr;
         }
 
-        // Send the message out to pass it around
-        let msg = NetworkMessage::Ledger(ledger.clone());
-        for _i in 0..2 {
-            if let Some(pbuf) = PacketBuffer::alloc(&msg)
-                && udp.broadcast(pbuf, UDP_PORT).await.is_err()
-            {
-                log_error!("Broadcast failed.");
-            }
-            Timer::after_millis(200).await;
-        }
+        Message::send_ledger(ledger.clone(), udp).await;
     }
 }
 

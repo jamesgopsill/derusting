@@ -1,8 +1,15 @@
 use core::net::Ipv4Addr;
 
+use embassy_time::Timer;
 use heapless::index_set::FnvIndexSet;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::{
+    UDP_PORT,
+    lwip::{packet_buffer::PacketBuffer, udp::UdpSocket},
+    tasks::rng::generate_uuid_v7,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Heartbeat {
@@ -33,7 +40,14 @@ pub struct Ledger {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum NetworkMessage<'a> {
+pub struct Message<'a> {
+    pub idempotency: Uuid,
+    #[serde(borrow)]
+    pub payload: Payload<'a>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Payload<'a> {
     Heartbeat(Heartbeat),
     NewJob(NewJob),
     #[serde(borrow)]
@@ -41,12 +55,48 @@ pub enum NetworkMessage<'a> {
     Ledger(Ledger),
 }
 
-impl<'a> NetworkMessage<'a> {
-    pub fn heartbeat() -> Self {
-        Self::Heartbeat(Heartbeat { alive: true })
+impl<'a> Message<'a> {
+    pub async fn send_heartbeat<const N: usize>(udp: &UdpSocket<N>) {
+        let msg = Self {
+            idempotency: generate_uuid_v7(),
+            payload: Payload::Heartbeat(Heartbeat { alive: true }),
+        };
+        Self::send(udp, msg).await;
     }
 
-    pub fn new_job(guid: Uuid) -> Self {
-        Self::NewJob(NewJob { guid })
+    pub async fn send_new_job_alert<const N: usize>(guid: Uuid, udp: &UdpSocket<N>) {
+        let msg = Self {
+            idempotency: generate_uuid_v7(),
+            payload: Payload::NewJob(NewJob { guid }),
+        };
+        Self::send(udp, msg).await;
+    }
+
+    pub async fn send_ledger<const N: usize>(ledger: Ledger, udp: &UdpSocket<N>) {
+        let msg = Self {
+            idempotency: generate_uuid_v7(),
+            payload: Payload::Ledger(ledger),
+        };
+        Self::send(udp, msg).await;
+    }
+
+    pub async fn send_chunk<const N: usize>(chunk: Chunk<'a>, udp: &UdpSocket<N>) {
+        let msg = Self {
+            idempotency: generate_uuid_v7(),
+            payload: Payload::Chunk(chunk),
+        };
+        Self::send(udp, msg).await;
+    }
+
+    async fn send<const N: usize>(udp: &UdpSocket<N>, msg: Self) {
+        for _ in 0..2 {
+            {
+                let Some(pbuf) = PacketBuffer::alloc(&msg) else {
+                    return;
+                };
+                let _ = udp.broadcast(pbuf, UDP_PORT).await;
+            }
+            Timer::after_millis(100).await
+        }
     }
 }
