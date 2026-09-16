@@ -5,6 +5,7 @@ use core::cell::RefCell;
 //use critical_section::Mutex;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::Mutex, mutex::Mutex as AsyncMutex};
+use embassy_time::Timer;
 use embassy_time_queue_utils::Queue;
 use heapless::LinearMap;
 use portable_atomic::{AtomicU32, AtomicU64};
@@ -22,7 +23,7 @@ use crate::{
         time_driver::FreeRtosTimeDriver,
     },
     kinds::{AddressBook, JobLedger},
-    lwip::{tcp::TcpListener, udp::UdpSocket},
+    lwip::{my_ipaddr, tcp::TcpListener, udp::UdpSocket},
     marlin::{is_ready, set_offline},
     tasks::{
         tcp::tcp_worker,
@@ -139,7 +140,15 @@ async fn embassy_main(spawner: Spawner) {
     };
     log_info!("TCP up on {TCP_PORT}");
 
-    match heartbeat(udp, ledger) {
+    // Wait for an IP address
+    loop {
+        if my_ipaddr().is_some() {
+            break;
+        };
+        Timer::after_secs(1).await;
+    }
+
+    match heartbeat(udp) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     }

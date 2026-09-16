@@ -19,15 +19,14 @@ use crate::{log_error, log_info};
 /// This task broadcasts a heartbeat to the network to inform
 /// other machines that this machine is alive and on the network.
 #[embassy_executor::task(pool_size = 1)]
-pub async fn heartbeat(udp: &'static UdpSocket<UDP_CHANNEL_SIZE>, ledger: &'static JobLedger) {
+pub async fn heartbeat(udp: &'static UdpSocket<UDP_CHANNEL_SIZE>) {
     loop {
         if let Some(addr) = my_ipaddr() {
             log_info!("[{:?}] heartbeat()", addr);
         } else {
             log_info!("[Unknown] heartbeat()");
         }
-        let has_ledger = ledger.lock().await.is_some();
-        if let Some(pbuf) = PacketBuffer::alloc(NetworkMessage::heartbeat(has_ledger))
+        if let Some(pbuf) = PacketBuffer::alloc(NetworkMessage::heartbeat())
             && udp.broadcast(pbuf, UDP_PORT).await.is_err()
         {
             log_error!("Broadcast failed.");
@@ -77,6 +76,9 @@ impl FileTransferTask {
                 self.last_chunk_received = Instant::now();
                 self.fh = Some(fh);
                 return;
+            } else {
+                self.reset();
+                return;
             }
         }
 
@@ -105,8 +107,11 @@ impl FileTransferTask {
                 // EOF chunk -> flush copy file and then
                 // move to gcode path
                 log_info!("File received");
-                self.reset();
+                if let Some(fh) = self.fh.take() {
+                    fh.close();
+                };
                 let _ = fs::rname(&self.partial_path, &self.final_path);
+                self.reset();
             }
         } else if chunk.chunk_id < self.current_chunk + 1 {
             log_info!("Previous chunk received");
@@ -130,7 +135,7 @@ pub async fn udp_receiver(
     let mut file_transfer = FileTransferTask::new();
     loop {
         let (addr, packet) = udp.receive().await;
-        log_info!("Recevied packet from: {addr}");
+        log_info!("Received packet from: {addr}");
 
         let Some(msg) = packet.into_iter().next() else {
             continue;
@@ -141,15 +146,19 @@ pub async fn udp_receiver(
             continue;
         };
 
-        if let NetworkMessage::Heartbeat(hb) = msg {
+        if let NetworkMessage::Heartbeat(_hb) = msg {
             let mut book = address_book.lock().await;
-            if let Err(e) = book.insert(addr, (Instant::now(), hb.has_ledger)) {
+            if let Err(e) = book.insert(addr, Instant::now()) {
                 log_error!("Address book error: {e:?}");
             };
             continue;
         }
 
         if let NetworkMessage::NewJob(new_job) = msg {
+            // At the moment, all add it but could only the
+            // owner really needs to do it in this format.
+            // But will be good if we need to assign a new owner
+            // if the current one goes offline.
             let mut ledge = ledger.lock().await;
             if let Some(l) = ledge.as_mut() {
                 let _ = l.jobs.insert(new_job.guid);
@@ -168,16 +177,11 @@ pub async fn udp_receiver(
             continue;
         }
 
-        // Check if I am now the owner of the ledger.
+        // Update the ledger I have to maintain sync. Only the owner
+        // should be sending this message out.
         if let NetworkMessage::Ledger(sent_ledger) = msg {
             let mut l = ledger.lock().await;
-            if let Some(my_addr) = my_ipaddr()
-                && sent_ledger.owner == my_addr
-                && l.is_none()
-            {
-                // Claim the ledger
-                *l = Some(sent_ledger);
-            }
+            *l = Some(sent_ledger);
         }
     }
 }
@@ -189,10 +193,7 @@ pub async fn address_book_lifetime_check(address_book: &'static AddressBook<ADDR
     loop {
         Timer::after_secs(10).await;
         let mut book = address_book.lock().await;
-        book.retain(|_k, v| {
-            let elapsed = v.0;
-            elapsed.as_secs() < 60
-        });
+        book.retain(|_k, elapsed| elapsed.as_secs() < 60);
     }
 }
 
@@ -206,11 +207,11 @@ pub async fn manage_ledger(
 ) -> ! {
     // Give all the services time to populate the address book
     // and see who is on the network.
-    Timer::after_secs(30).await;
+    Timer::after_secs(20).await;
     loop {
         // Give all the services time to populate the address book
         // and see who is on the network.
-        Timer::after_secs(10).await;
+        Timer::after_secs(8).await;
         let Some(my_addr) = my_ipaddr() else {
             log_error!("Can't find my IP address");
             continue;
@@ -219,39 +220,39 @@ pub async fn manage_ledger(
         let book_guard = address_book.lock().await;
         let mut ledger_guard = ledger.lock().await;
 
-        // v.1 being a bool to indicate if there is a ledger
-        // in play
-        let ledger_exists = book_guard.iter().any(|(_k, v)| v.1);
-        let ledger_is_none = ledger_guard.is_none();
-        log_info!(
-            "exists: {} ledger_is_none: {}",
-            ledger_exists,
-            ledger_is_none
-        );
         // If the ledger does not exist and I do not have it then
         // I will make one.
-        if !ledger_exists && ledger_is_none {
+        if ledger_guard.is_none() {
             log_info!("Creating new ledger");
-            *ledger_guard = Some(Ledger {
+            let ledger = Ledger {
                 owner: my_addr,
                 jobs: FnvIndexSet::new(),
-            });
-            // Declare it as soon as possible
-            if let Some(pbuf) = PacketBuffer::alloc(NetworkMessage::heartbeat(true))
-                && udp.broadcast(pbuf, UDP_PORT).await.is_err()
-            {
-                log_error!("Broadcast failed.");
+            };
+            *ledger_guard = Some(ledger.clone());
+            let msg = NetworkMessage::Ledger(ledger);
+            drop(ledger_guard);
+            // Tell anyone who has joined that I have it.
+            for _i in 0..2 {
+                if let Some(pbuf) = PacketBuffer::alloc(&msg)
+                    && udp.broadcast(pbuf, UDP_PORT).await.is_err()
+                {
+                    log_error!("Broadcast failed.");
+                }
+                Timer::after_millis(200).await;
             }
             continue;
         }
 
-        let Some(mut ledger) = ledger_guard.take() else {
+        let Some(ledger) = ledger_guard.as_mut() else {
             log_info!("I do not have the ledger");
             continue;
         };
 
+        // Am I the owner?
+        let is_owner = my_addr == ledger.owner;
+
         // I have the ledger lets see if I can do something.
-        if marlin::is_ready() && marlin::is_idle() {
+        if is_owner && marlin::is_ready() && marlin::is_idle() {
             log_info!("Available for Jobs");
 
             // Find the first printable job
@@ -279,11 +280,22 @@ pub async fn manage_ledger(
 
         if book_guard.is_empty() {
             log_info!("It's only me - keeping ledger");
-            *ledger_guard = Some(ledger);
+            let msg = NetworkMessage::Ledger(ledger.clone());
+            drop(ledger_guard);
+            // Tell the other machines I have it anyway. Help
+            // maintain synchronicity.
+            for _i in 0..2 {
+                if let Some(pbuf) = PacketBuffer::alloc(&msg)
+                    && udp.broadcast(pbuf, UDP_PORT).await.is_err()
+                {
+                    log_error!("Broadcast failed.");
+                }
+                Timer::after_millis(200).await;
+            }
             continue;
         }
 
-        // Pass on the ledger
+        // Pass on the ledger to the next machine
         let mut next_highest = u8::MAX;
         let mut next_addr: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 255);
         for addr in book_guard.keys() {
@@ -295,16 +307,16 @@ pub async fn manage_ledger(
             }
         }
         // We know there is one from our previous checks
-        if next_highest > 0 {
+        if next_highest > 0 && next_highest < u8::MAX {
             ledger.owner = next_addr;
         } else {
-            // We know there is at lease one in the address book.
+            // We know there is at least one in the address book.
             let min_addr = book_guard.keys().min().unwrap();
             ledger.owner = *min_addr;
         }
 
         // Send the message out to pass it around
-        let msg = NetworkMessage::Ledger(ledger);
+        let msg = NetworkMessage::Ledger(ledger.clone());
         for _i in 0..2 {
             if let Some(pbuf) = PacketBuffer::alloc(&msg)
                 && udp.broadcast(pbuf, UDP_PORT).await.is_err()

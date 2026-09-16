@@ -13,6 +13,7 @@ use crate::{
     kinds::{AddressBook, JobLedger},
     log_error, log_info,
     lwip::{
+        my_ipaddr,
         packet_buffer::PacketBuffer,
         tcp::{TcpConnection, TcpListener},
         udp::UdpSocket,
@@ -231,9 +232,24 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
 
     let is_owner = {
         let mut guard = ledger.lock().await;
-        if let Some(ledge) = guard.as_mut() {
+        if let Some(ledge) = guard.as_mut()
+            && let Some(addr) = my_ipaddr()
+            && addr == ledge.owner
+        {
             log_info!("I own the ledger. Adding the file");
             let _ = ledge.jobs.insert(guid);
+            // Send the ledger out. Everyone keeps a copy.
+            for _ in 0..3 {
+                {
+                    let msg = NetworkMessage::Ledger(ledge.clone());
+                    if let Some(pbuf) = PacketBuffer::alloc(&msg)
+                        && udp.broadcast(pbuf, UDP_PORT).await.is_err()
+                    {
+                        log_error!("Broadcasting job failed.");
+                    }
+                }
+                Timer::after_millis(100).await;
+            }
             true
         } else {
             false
@@ -245,15 +261,13 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
             // Scope `msg` so it does not persist across `Timer::after_millis`
             {
                 let msg = NetworkMessage::new_job(guid);
-                if let Some(pbuf) = PacketBuffer::alloc(&msg) {
-                    if udp.broadcast(pbuf, UDP_PORT).await.is_err() {
-                        log_error!("Broadcasting job failed.");
-                    } else {
-                        log_info!("Job message sent");
-                    }
+                if let Some(pbuf) = PacketBuffer::alloc(&msg)
+                    && udp.broadcast(pbuf, UDP_PORT).await.is_err()
+                {
+                    log_error!("Broadcasting job failed.");
                 }
             }
-            Timer::after_millis(200).await;
+            Timer::after_millis(100).await;
         }
     }
 }
@@ -310,13 +324,13 @@ async fn broadcast_file<const N1: usize, const N2: usize>(
                 };
                 let msg = NetworkMessage::Chunk(chunk);
 
-                if let Some(pbuf) = PacketBuffer::alloc(&msg) {
-                    if udp.broadcast(pbuf, UDP_PORT).await.is_err() {
-                        log_error!("Broadcasting job chunk failed.");
-                    }
+                if let Some(pbuf) = PacketBuffer::alloc(&msg)
+                    && udp.broadcast(pbuf, UDP_PORT).await.is_err()
+                {
+                    log_error!("Broadcasting job chunk failed.");
                 }
             }
-            Timer::after_millis(200).await;
+            Timer::after_millis(100).await;
         }
 
         if eof {

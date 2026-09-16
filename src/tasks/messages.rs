@@ -7,7 +7,6 @@ use uuid::Uuid;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Heartbeat {
     pub alive: bool,
-    pub has_ledger: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,10 +26,10 @@ pub struct Chunk<'a> {
     pub chunk: &'a [u8],
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Ledger {
     pub owner: Ipv4Addr,
-    pub jobs: FnvIndexSet<Uuid, 16>,
+    pub jobs: FnvIndexSet<Uuid, 8>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,11 +42,8 @@ pub enum NetworkMessage<'a> {
 }
 
 impl<'a> NetworkMessage<'a> {
-    pub fn heartbeat(has_ledger: bool) -> Self {
-        Self::Heartbeat(Heartbeat {
-            alive: true,
-            has_ledger,
-        })
+    pub fn heartbeat() -> Self {
+        Self::Heartbeat(Heartbeat { alive: true })
     }
 
     pub fn new_job(guid: Uuid) -> Self {
