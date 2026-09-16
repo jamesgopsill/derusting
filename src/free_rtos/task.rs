@@ -6,12 +6,14 @@ use crate::free_rtos::bindings::*;
 
 /// A safe wrapper around a FreeRTOS task.
 pub struct Task {
+    #[allow(unused)]
     inner: *mut RtosTask,
 }
 
 impl Task {
     /// Create a new Task that is given a name, stack_depth and the function that it
     /// should run.
+    #[allow(unused)]
     pub fn new(
         name: &CStr,
         stack_depth: u16,
@@ -35,6 +37,28 @@ impl Task {
         }
     }
 
+    pub fn new_static(
+        name: &CStr,
+        fcn: TaskFn,
+        priority: u32,
+        stack_buf: &mut [u8],
+        tcb_buf: &mut [u8],
+    ) -> Self {
+        let task = unsafe {
+            xTaskCreateStatic(
+                fcn,
+                name.as_ptr(),
+                (stack_buf.len() / 4) as u16,
+                ptr::null_mut(),
+                priority,
+                stack_buf.as_mut_ptr(),
+                tcb_buf.as_mut_ptr(),
+            )
+        };
+        Self { inner: task }
+    }
+
+    #[allow(unused)]
     pub fn as_mut_ptr(&self) -> *mut RtosTask {
         self.inner
     }

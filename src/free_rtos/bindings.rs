@@ -67,6 +67,23 @@ unsafe extern "C" {
         px_created_task: *mut RtosTask,
     ) -> FreeRtosError;
 
+    pub fn xTaskCreateStatic(
+        // Pointer to your extern "C" Rust function
+        px_task_code: TaskFn,
+        // Name of the task
+        pc_name: *const c_char,
+        // Stack depth in words
+        us_stack_depth: u16,
+        // Arguments to be passed to the task
+        pv_parameters: *mut RtosTaskParams,
+        // Task Priority
+        ux_priority: u32,
+        // Stack buffer
+        stack_buf_ptr: *mut u8,
+        // TCB buffer ~[0u8; 128]
+        tcb_buf_ptr: *mut u8,
+    ) -> *mut RtosTask;
+
     /// Delay a task.
     pub fn vTaskDelay(ticks: u32);
 

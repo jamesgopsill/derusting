@@ -1,24 +1,21 @@
 #![no_std]
 
-use core::{
-    cell::RefCell,
-    ptr::{self},
-};
+use core::cell::RefCell;
 
 //use critical_section::Mutex;
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::Mutex, mutex::Mutex as AsyncMutex};
 use embassy_time_queue_utils::Queue;
 use heapless::LinearMap;
-use portable_atomic::{AtomicPtr, AtomicU32, AtomicU64};
+use portable_atomic::{AtomicU32, AtomicU64};
 use static_cell::StaticCell;
 
 use crate::{
     free_rtos::{
         alloc::FreeRtosAllocator,
         bindings::{
-            RtosTask, RtosTaskParams, uxTaskGetStackHighWaterMark, vTaskDelay,
-            xPortGetFreeHeapSize, xTaskGetCurrentTaskHandle,
+            RtosTaskParams, uxTaskGetStackHighWaterMark, vTaskDelay, xPortGetFreeHeapSize,
+            xTaskGetCurrentTaskHandle,
         },
         executor::FreeRtosTaskExecutor,
         task::Task,
@@ -61,11 +58,13 @@ embassy_time_driver::time_driver_impl!(static DRIVER: FreeRtosTimeDriver = FreeR
     free_rtos_now: AtomicU32::new(u32::MIN),
 });
 
-/// Keep track of our FreeRTOS task that is running our Embassy executor.
-static TASK: AtomicPtr<RtosTask> = AtomicPtr::new(ptr::null_mut());
-
 /// Static store for our Embassy Executor.
 static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
+
+/// Reserving space for our task at compile time.
+const STACK_BYTES: usize = 1024 * 10; // / 4 for u32 stack words
+static mut RTOS_STACK: [u8; STACK_BYTES] = [0u8; STACK_BYTES];
+static mut RTOS_TCB: [u8; 128] = [0u8; 128];
 
 /// # Safety
 /// We will ensure that we call this function in an
@@ -73,16 +72,11 @@ static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn derusting_main() {
     log_info!("derusting_main()");
-    match Task::try_from(&TASK) {
-        Ok(_) => log_info!("Embassy has been created"),
-        Err(_) => match Task::new(c"Embassy", 512 * 6, 1, embassy) {
-            Ok(t) => {
-                log_info!("Embassy task created.");
-                TASK.store(t.as_mut_ptr(), core::sync::atomic::Ordering::SeqCst);
-            }
-            Err(_) => log_error!("Failed to create Embassy task."),
-        },
-    }
+    #[allow(static_mut_refs)]
+    let stack = unsafe { RTOS_STACK.as_mut_slice() };
+    #[allow(static_mut_refs)]
+    let tcb = unsafe { RTOS_TCB.as_mut_slice() };
+    let _ = Task::new_static(c"Embassy", embassy, 1, stack, tcb);
 }
 
 /// Our FreeRTOS Embassy Task that spawns and never returns.
@@ -103,7 +97,6 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
     set_offline();
 
     // TODO: Clear `.gcode` files from the USB stick if it has old jobs on it.
-
     log_info!("Initialising Executor");
 
     let executor = EXECUTOR.init(FreeRtosTaskExecutor::new(current_task as _));
@@ -162,7 +155,7 @@ async fn embassy_main(spawner: Spawner) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     }
-    for _ in 0..1 {
+    for _i in 0..2 {
         match tcp_worker(tcp, udp, address_book, ledger) {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),

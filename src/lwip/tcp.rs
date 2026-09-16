@@ -42,7 +42,7 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
                 tcp_close(pcb);
                 return Err(err);
             }
-            let listen_pcb = tcp_listen_with_backlog(pcb, 1);
+            let listen_pcb = tcp_listen_with_backlog(pcb, 2);
             if listen_pcb.is_null() {
                 // tcp_close(pcb); unsure I think lwip handles this
                 return Err(LwipError::Mem);
@@ -236,14 +236,20 @@ impl<const N: usize> TcpConnection<N> {
             return LwipError::Val;
         }
         let conn = unsafe { &*(arg as *const TcpConnection<N>) };
-        let Ok(pb) = PacketBuffer::try_from(pbuf) else {
-            // Should not be the case.
-            if !pbuf.is_null() {
-                unsafe { pbuf_free(pbuf) };
-            }
-            let _ = conn.channel.try_send(None);
-            return LwipError::Val;
-        };
+
+        if pbuf.is_null() {
+            // TODO: Debug - Should be null when closed but return null
+            // early PUT stream so ignore it and it works. Need to work
+            // out connection drops.
+            log_info!("Remote closed connection (EOF / FIN received)");
+            // Push None to notify readers on `receive()` that stream has ended
+            // let _ = conn.channel.try_send(None);
+            // Per lwIP docs, you MUST return ERR_OK when pbuf is NULL
+            return LwipError::Ok;
+        }
+
+        // Should not fail.
+        let pb = PacketBuffer::try_from(pbuf).unwrap();
 
         match conn.channel.try_send(Some(pb)) {
             Ok(_) => LwipError::Ok,
