@@ -1,25 +1,22 @@
 use core::pin::Pin;
 
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, mutex::Mutex};
-use embedded_io::{Read as _, Write as _};
+use embedded_io::Write as _;
 use uuid::Uuid;
 
 use crate::{
-    ADDRESS_BOOK_ENTRIES, MAX_TCP_CONNECTION_CHANNEL_SIZE, MAX_TCP_CONNECTIONS, UDP_CHANNEL_SIZE,
-    fs::{self, ReadBytes, WriteBytes},
+    ADDRESS_BOOK_ENTRIES, MAX_TCP_CONNECTION_CHANNEL_SIZE, MAX_TCP_CONNECTIONS, TCP_PORT,
+    UDP_CHANNEL_SIZE,
+    fs::{self, WriteBytes},
     http::{BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK},
     kinds::{AddressBook, JobLedger},
     log_error, log_info,
     lwip::{
         my_ipaddr,
+        put::put_file,
         tcp::{TcpConnection, TcpListener},
         udp::UdpSocket,
     },
-    tasks::{
-        messages::{Chunk, Message},
-        rng::generate_uuid_v7,
-        udp::make_path,
-    },
+    tasks::{messages::Message, rng::generate_uuid_v7},
 };
 
 /// This task receives new tcp handlers and spawns
@@ -78,18 +75,28 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
         }
         Method::Put => {
             log_info!("/ PUT request");
-            let Ok(mut content_length) = check_put_header(headers) else {
+
+            let info = check_put_header(headers);
+            if !info.is_gcode
+                || info.size.is_none()
+                || info.size.is_some_and(|s| s == 0 || s > 1_000_000)
+            {
                 let _ = conn.response(BAD_REQUEST.as_bytes()).await;
                 return;
-            };
+            }
 
-            let guid = generate_uuid_v7();
-            let path = make_path(&guid, true);
+            let guid = match info.guid {
+                Some(guid) => guid,
+                None => generate_uuid_v7(),
+            };
+            let path = fs::make_path(&guid, true);
 
             let Ok(mut f) = fs::open(path.as_c_str(), WriteBytes) else {
                 let _ = conn.response(INTERNAL_SERVER_ERROR.as_bytes()).await;
                 return;
             };
+
+            let mut content_length = info.size.unwrap();
 
             // Write bytes to file from current chunk
             let to_write = core::cmp::min(content_length, body.len());
@@ -130,14 +137,16 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
             }
 
             f.close();
-            let new_path = make_path(&guid, false);
+            let new_path = fs::make_path(&guid, false);
             // Rename from partial to full.
             fs::rname(&path, &new_path);
             let _ = conn.response(OK.as_bytes()).await;
 
-            append_to_ledger(guid, address_book, ledger, udp).await;
-
-            broadcast_file(guid, address_book, udp).await;
+            if info.guid.is_none() {
+                // New file to the system so we alert everyone else
+                append_to_ledger(guid, address_book, ledger, udp).await;
+                distribute_file(guid, address_book).await;
+            }
         }
     }
 }
@@ -184,32 +193,40 @@ fn check_start_line(start_line: &str) -> Result<Method, &'static str> {
     Ok(method)
 }
 
+#[derive(Debug)]
+pub struct PutInfo {
+    pub size: Option<usize>,
+    pub guid: Option<Uuid>,
+    pub is_gcode: bool,
+}
+
 /// Analyses the PUT header to ensure it features the information
 /// we require to process the request.
-fn check_put_header(headers: &str) -> Result<usize, &'static str> {
-    let mut content_length = None;
-    let mut content_type_ok = false;
+fn check_put_header(headers: &str) -> PutInfo {
+    let mut info = PutInfo {
+        size: None,
+        guid: None,
+        is_gcode: false,
+    };
 
     for line in headers.lines() {
         let Some((key, val)) = line.split_once(':') else {
-            return Err(BAD_REQUEST);
+            // TODO: error out again?
+            continue;
         };
         let key = key.trim();
         let val = val.trim();
 
         if key.eq_ignore_ascii_case("content-length") {
-            content_length = val.parse::<usize>().ok();
+            info.size = val.parse::<usize>().ok();
         } else if key.eq_ignore_ascii_case("content-type") && val == "text/x.gcode" {
-            content_type_ok = true;
+            info.is_gcode = true;
+        } else if key.eq_ignore_ascii_case("guid") {
+            info.guid = val.parse::<Uuid>().ok();
         }
     }
 
-    let len = content_length.ok_or(BAD_REQUEST)?;
-    if !content_type_ok || len == 0 || len > 1_000_000 {
-        return Err(BAD_REQUEST);
-    }
-
-    Ok(len)
+    info
 }
 
 async fn append_to_ledger<const N1: usize, const N2: usize>(
@@ -235,7 +252,6 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
         {
             log_info!("I own the ledger. Adding the file");
             let _ = ledge.jobs.insert(guid);
-            Message::send_ledger(ledge.clone(), udp).await;
             true
         } else {
             false
@@ -247,58 +263,13 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
     }
 }
 
-static BROADCAST_BUF: Mutex<ThreadModeRawMutex, [u8; 768]> = Mutex::new([0u8; 768]);
-
-async fn broadcast_file<const N1: usize, const N2: usize>(
-    guid: Uuid,
-    address_book: &AddressBook<N1>,
-    udp: &UdpSocket<N2>,
-) {
-    // Now open, read and send the file chunks to propogate
-    // it through the network. Only if there are machines
-    // to broadcast to.
-    let address_book_is_empty = {
-        let guard = address_book.lock().await;
-        guard.is_empty()
-    };
-    if address_book_is_empty {
-        return;
-    }
-
-    let path = make_path(&guid, false);
-
-    let Ok(mut f) = fs::open(&path, ReadBytes) else {
-        log_error!("Failed to open file for broadcast");
-        return;
-    };
-
-    let mut chunk_id: u16 = 0;
-    let mut buf = BROADCAST_BUF.lock().await;
-
-    loop {
-        let bytes_read = match f.read(buf.as_mut_slice()) {
-            Ok(n) => n,
-            Err(e) => {
-                log_error!("File read error: {e:?}");
-                break;
-            }
+async fn distribute_file<const N1: usize>(guid: Uuid, address_book: &AddressBook<N1>) {
+    // Do not want to hold onto the lock
+    let addrs = address_book.lock().await.clone();
+    for (addr, _v) in addrs {
+        log_info!("Sending file to {addr}");
+        if let Err(err) = put_file(guid, addr, TCP_PORT).await {
+            log_error!("Put Error: {err}");
         };
-
-        chunk_id += 1;
-        let eof = bytes_read == 0;
-
-        let chunk = Chunk {
-            guid,
-            chunk_id,
-            last_chunk: eof,
-            len: bytes_read as u16,
-            chunk: &buf[..bytes_read],
-        };
-
-        Message::send_chunk(chunk, udp).await;
-
-        if eof {
-            break;
-        }
     }
 }

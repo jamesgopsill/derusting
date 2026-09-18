@@ -111,14 +111,20 @@ const PBUF_TYPE_ALLOC_SRC_MASK_APP_MIN: u32 = 0x03;
 
 pub type TcpAcceptFn =
     unsafe extern "C" fn(arg: *mut c_void, pcb: *mut lwip_pcb, err: LwipError) -> LwipError;
+
 pub type TcpRecvFn = unsafe extern "C" fn(
     arg: *mut c_void,
     pcb: *mut lwip_pcb,
     pbuf: *mut lwip_pbuf,
     err: LwipError,
 ) -> LwipError;
+
 pub type TcpSentFn =
-    unsafe extern "C" fn(arg: *mut c_void, _pcb: *mut lwip_pcb, len: u16) -> LwipError;
+    unsafe extern "C" fn(arg: *mut c_void, pcb: *mut lwip_pcb, len: u16) -> LwipError;
+
+pub type TcpConnectedFn =
+    unsafe extern "C" fn(arg: *mut c_void, pcb: *mut lwip_pcb, err: LwipError) -> LwipError;
+
 pub type UdpRecvFn = unsafe extern "C" fn(
     arg: *mut c_void,
     pcb: *mut lwip_pcb,
@@ -171,6 +177,16 @@ unsafe extern "C" {
     pub(super) fn tcp_arg(pcb: *mut lwip_pcb, arg: *mut c_void);
 
     pub(super) fn tcp_abort(pcb: *mut lwip_pcb);
+
+    pub(super) fn tcp_connect(
+        pcb: *mut lwip_pcb,
+        addr: *const lwip_ipaddr,
+        port: u16,
+        callback: TcpConnectedFn,
+    ) -> LwipError;
+
+    // Our own wrapper around their macro
+    pub(super) fn derusting_tcp_sndbuf(pcb: *const lwip_pcb) -> u16;
 
     // --- TCP Callbacks ---
 

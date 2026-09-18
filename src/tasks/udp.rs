@@ -1,17 +1,15 @@
 use core::net::Ipv4Addr;
 
-use alloc::string::ToString as _;
 use embassy_time::{Instant, Timer};
-use embedded_io::Write as _;
+use heapless::HistoryBuf;
 use heapless::index_set::FnvIndexSet;
-use heapless::{CString, HistoryBuf};
 use uuid::Uuid;
 
-use crate::fs::{self, File, ReadBytes, WriteBytes};
+use crate::fs::{self, ReadBytes, make_path};
 use crate::kinds::{AddressBook, JobLedger};
 use crate::lwip::my_ipaddr;
 use crate::lwip::udp::UdpSocket;
-use crate::tasks::messages::{Chunk, Ledger, Message, Payload};
+use crate::tasks::messages::{Ledger, Message, Payload};
 use crate::{ADDRESS_BOOK_ENTRIES, UDP_CHANNEL_SIZE, marlin};
 use crate::{log_error, log_info};
 
@@ -26,95 +24,7 @@ pub async fn heartbeat(udp: &'static UdpSocket<UDP_CHANNEL_SIZE>) {
             log_info!("[Unknown] heartbeat()");
         }
         Message::send_heartbeat(udp).await;
-        Timer::after_secs(5).await;
-    }
-}
-
-struct FileTransferTask {
-    fh: Option<File<WriteBytes>>,
-    guid: Uuid,
-    current_chunk: u16,
-    last_chunk_received: Instant,
-    partial_path: CString<64>,
-    final_path: CString<64>,
-}
-
-impl FileTransferTask {
-    fn new() -> Self {
-        Self {
-            fh: None,
-            guid: Uuid::nil(),
-            current_chunk: 0,
-            last_chunk_received: Instant::from_secs(0),
-            partial_path: CString::new(),
-            final_path: CString::new(),
-        }
-    }
-
-    fn reset(&mut self) {
-        self.fh = None;
-        self.guid = Uuid::nil();
-        self.current_chunk = 0;
-        self.last_chunk_received = Instant::from_secs(0);
-        self.partial_path = CString::new();
-        self.final_path = CString::new();
-    }
-
-    fn digest(&mut self, chunk: Chunk) {
-        if self.fh.is_none() && chunk.chunk_id == 1 {
-            self.guid = chunk.guid;
-            self.partial_path = make_path(&self.guid, true);
-            self.final_path = make_path(&self.guid, false);
-            if let Ok(mut fh) = fs::open(&self.partial_path, WriteBytes) {
-                // TODO: handle errors
-                let _ = fh.write(chunk.chunk);
-                self.last_chunk_received = Instant::now();
-                self.fh = Some(fh);
-                return;
-            } else {
-                self.reset();
-                return;
-            }
-        }
-
-        let Some(fh) = self.fh.as_mut() else { return };
-
-        // If it has been too long between expected chunks.
-        if self.last_chunk_received.elapsed().as_secs() > 3 {
-            log_error!("Last file transfer timeout - Reset");
-            let _ = fs::delete(&self.partial_path);
-            self.reset();
-            return;
-        }
-
-        if chunk.guid != self.guid {
-            // This chunk is for another file.
-            return;
-        }
-
-        // If it is the next chunk
-        if chunk.chunk_id == self.current_chunk + 1 {
-            // Write the chunk
-            let _ = fh.write(&chunk.chunk[..chunk.len as usize]);
-            self.current_chunk += 1;
-            self.last_chunk_received = Instant::now();
-            if chunk.last_chunk {
-                // EOF chunk -> flush copy file and then
-                // move to gcode path
-                log_info!("File received");
-                if let Some(fh) = self.fh.take() {
-                    fh.close();
-                };
-                let _ = fs::rname(&self.partial_path, &self.final_path);
-                self.reset();
-            }
-        } else if chunk.chunk_id < self.current_chunk + 1 {
-            log_info!("Previous chunk received");
-        } else {
-            log_error!("We missed a chunk. Oh well lets start again.");
-            let _ = fs::delete(&self.partial_path);
-            self.reset();
-        }
+        Timer::after_secs(2).await;
     }
 }
 
@@ -127,9 +37,9 @@ pub async fn udp_receiver(
     ledger: &'static JobLedger,
 ) {
     log_info!("Ready to receive UDP packets");
-    let mut file_transfer = FileTransferTask::new();
+    // let mut file_transfer = FileTransferTask::new();
     // Holds the last 12 unique message idempotencies
-    let mut history: HistoryBuf<Uuid, 12> = HistoryBuf::new();
+    let mut history: HistoryBuf<Uuid, 24> = HistoryBuf::new();
     loop {
         let (addr, packet) = udp.receive().await;
         log_info!("Received packet from: {addr}");
@@ -149,42 +59,35 @@ pub async fn udp_receiver(
         }
         history.write(msg.idempotency);
 
-        if let Payload::Heartbeat(_hb) = msg.payload {
+        {
             let mut book = address_book.lock().await;
             if let Err(e) = book.insert(addr, Instant::now()) {
                 log_error!("Address book error: {e:?}");
             };
-            continue;
         }
 
-        if let Payload::NewJob(new_job) = msg.payload {
+        if let Payload::NewJob(data) = msg.payload {
             // At the moment, all add it but could only the
             // owner really needs to do it in this format.
             // But will be good if we need to assign a new owner
             // if the current one goes offline.
-            let mut ledge = ledger.lock().await;
-            if let Some(l) = ledge.as_mut() {
-                let _ = l.jobs.insert(new_job.guid);
+            {
+                let mut guard = ledger.lock().await;
+                if let Some(ledger) = guard.as_mut() {
+                    let _ = ledger.jobs.insert(data.guid);
+                }
             }
-            continue;
-        }
-
-        // We have received a chunk of a gcode file. We can only process
-        // one file at a time. We check if we're not already processing
-        // a file. Check whether the chunk_id is the next one in the list.
-        // TODO: We need to include the uuid of the job as multiple jobs
-        // at the same time might interfere with one another.
-        // NOTE: Future me, improve to handle multiple files at the same.
-        if let Payload::Chunk(chunk) = msg.payload {
-            file_transfer.digest(chunk);
             continue;
         }
 
         // Update the ledger I have to maintain sync. Only the owner
         // should be sending this message out.
         if let Payload::Ledger(sent_ledger) = msg.payload {
-            let mut l = ledger.lock().await;
-            *l = Some(sent_ledger);
+            {
+                let mut l = ledger.lock().await;
+                *l = Some(sent_ledger);
+            }
+            continue;
         }
     }
 }
@@ -196,7 +99,7 @@ pub async fn address_book_lifetime_check(address_book: &'static AddressBook<ADDR
     loop {
         Timer::after_secs(10).await;
         let mut book = address_book.lock().await;
-        book.retain(|_k, elapsed| elapsed.as_secs() < 60);
+        book.retain(|_k, instant| instant.elapsed().as_secs() < 20);
     }
 }
 
@@ -214,7 +117,7 @@ pub async fn manage_ledger(
     loop {
         // Give all the services time to populate the address book
         // and see who is on the network.
-        Timer::after_secs(8).await;
+        Timer::after_secs(5).await;
         let Some(my_addr) = my_ipaddr() else {
             log_error!("Can't find my IP address");
             continue;
@@ -244,7 +147,7 @@ pub async fn manage_ledger(
         // Am I the owner?
         let is_owner = my_addr == ledger.owner;
 
-        // I have the ledger lets see if I can do something.
+        // I have the ledger - let's see if I can manufacture something.
         if is_owner && marlin::is_ready() && marlin::is_idle() {
             log_info!("Available for Jobs");
 
@@ -271,47 +174,35 @@ pub async fn manage_ledger(
             }
         }
 
-        if book_guard.is_empty() {
-            log_info!("It's only me - keeping ledger - and telling everyone.");
-            Message::send_ledger(ledger.clone(), udp).await;
-            continue;
-        }
-
-        // Pass on the ledger to the next machine
-        let mut next_highest = u8::MAX;
-        let mut next_addr: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 255);
-        for addr in book_guard.keys() {
-            let diff = addr.octets()[3].saturating_sub(my_addr.octets()[3]);
-            if diff > 0 && diff < next_highest {
-                // A closer IP address has been found;
-                next_addr = *addr;
-                next_highest = diff;
+        // If I am the owner then I should try and pass the ledger on.
+        if is_owner {
+            if book_guard.is_empty() {
+                log_info!("It's only me - keeping ledger - and telling everyone.");
+                Message::send_ledger(ledger.clone(), udp).await;
+                continue;
             }
+
+            // Pass on the ledger to the next machine
+            let mut next_highest = u8::MAX;
+            let mut next_addr: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 255);
+            for addr in book_guard.keys() {
+                let diff = addr.octets()[3].saturating_sub(my_addr.octets()[3]);
+                if diff > 0 && diff < next_highest {
+                    // A closer IP address has been found;
+                    next_addr = *addr;
+                    next_highest = diff;
+                }
+            }
+            // We know there is one from our previous checks
+            if next_highest > 0 && next_highest < u8::MAX {
+                ledger.owner = next_addr;
+            } else {
+                // We know there is at least one in the address book.
+                let min_addr = book_guard.keys().min().unwrap();
+                ledger.owner = *min_addr;
+            }
+
+            Message::send_ledger(ledger.clone(), udp).await;
         }
-        // We know there is one from our previous checks
-        if next_highest > 0 && next_highest < u8::MAX {
-            ledger.owner = next_addr;
-        } else {
-            // We know there is at least one in the address book.
-            let min_addr = book_guard.keys().min().unwrap();
-            ledger.owner = *min_addr;
-        }
-
-        Message::send_ledger(ledger.clone(), udp).await;
     }
-}
-
-// TODO: file cleanup.
-
-/// Create the full file path for a given uuid.
-pub fn make_path(job_guid: &Uuid, partial: bool) -> CString<64> {
-    let mut path = CString::<64>::new();
-    let _ = path.extend_from_bytes(b"/usb/");
-    let _ = path.extend_from_bytes(job_guid.to_string().as_bytes());
-    if partial {
-        let _ = path.extend_from_bytes(b".partial");
-    } else {
-        let _ = path.extend_from_bytes(b".gcode");
-    }
-    path
 }

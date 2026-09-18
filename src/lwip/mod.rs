@@ -7,6 +7,7 @@ use crate::lwip::bindings::{LwipError, netif_default, tcpip_callback};
 pub mod bindings;
 pub mod ipaddr;
 pub mod packet_buffer;
+pub mod put;
 pub mod tcp;
 pub mod udp;
 

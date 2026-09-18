@@ -1,7 +1,10 @@
 use core::ffi::{CStr, c_char, c_int, c_long};
 
 use crate::{log_error, log_info};
+use alloc::string::ToString as _;
 use embedded_io::Write as _;
+use heapless::CString;
+use uuid::Uuid;
 
 /// Represents the `stdio.h` Fil struct. The Prusa firmware enables you
 /// to use `stdio` calls to work with files. Under the hood it is using
@@ -9,6 +12,67 @@ use embedded_io::Write as _;
 #[repr(C)]
 struct Fil {
     _opaque: [u8; 0],
+}
+
+/// Mirrors FatFs's FILINFO struct, for this firmware's config:
+/// FF_FS_EXFAT=0 (fsize is u32), FF_USE_LFN=2 (altname+fname present,
+/// stack-allocated working buffer), FF_LFN_UNICODE=2 (TCHAR=UTF-8 char),
+/// FF_SFN_BUF=34, FF_LFN_BUF=255.
+#[repr(C)]
+pub struct FilInfo {
+    pub fsize: u32,
+    pub fdate: u16,
+    pub ftime: u16,
+    pub fattrib: u8,
+    pub altname: [c_char; 35],
+    pub fname: [c_char; 256],
+}
+
+/// Mirrors FatFs's `FRESULT` enum (see `ff.h`).
+#[allow(unused)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FResult {
+    #[error("Succeeded")]
+    Ok = 0,
+    #[error("A hard error occurred in the low level disk I/O layer")]
+    DiskErr = 1,
+    #[error("Assertion failed (internal FatFs error)")]
+    IntErr = 2,
+    #[error("The physical drive cannot work")]
+    NotReady = 3,
+    #[error("Could not find the file")]
+    NoFile = 4,
+    #[error("Could not find the path")]
+    NoPath = 5,
+    #[error("The path name format is invalid")]
+    InvalidName = 6,
+    #[error("Access denied due to prohibited access or directory full")]
+    Denied = 7,
+    #[error("Access denied due to prohibited access")]
+    Exist = 8,
+    #[error("The file/directory object is invalid")]
+    InvalidObject = 9,
+    #[error("The physical drive is write protected")]
+    WriteProtected = 10,
+    #[error("The logical drive number is invalid")]
+    InvalidDrive = 11,
+    #[error("The volume has no work area")]
+    NotEnabled = 12,
+    #[error("There is no valid FAT volume")]
+    NoFilesystem = 13,
+    #[error("The f_mkfs() aborted due to any problem")]
+    MkfsAborted = 14,
+    #[error("Could not get a grant to access the volume within defined period")]
+    Timeout = 15,
+    #[error("The operation is rejected according to the file sharing policy")]
+    Locked = 16,
+    #[error("LFN working buffer could not be allocated")]
+    NotEnoughCore = 17,
+    #[error("Number of open files > FF_FS_LOCK")]
+    TooManyOpenFiles = 18,
+    #[error("Given parameter is invalid")]
+    InvalidParameter = 19,
 }
 
 unsafe extern "C" {
@@ -40,6 +104,8 @@ unsafe extern "C" {
     /// Renames or moves a file.
     /// Returns 0 on success, or a non-zero value / -1 on failure.
     fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int;
+
+    fn f_stat(path: *const c_char, fno: *mut FilInfo) -> FResult;
 }
 
 /// A trait the produces the necesary flags for `fopen`
@@ -103,6 +169,36 @@ pub fn delete(path: &CStr) -> c_int {
 
 pub fn rname(old_path: &CStr, new_path: &CStr) -> c_int {
     unsafe { rename(old_path.as_ptr(), new_path.as_ptr()) }
+}
+
+pub fn stat(path: &CStr) -> Result<FilInfo, FResult> {
+    let bytes = path.to_bytes();
+    if !bytes.starts_with(b"/usb/") {
+        log_error!("Path must start with /usb/");
+        return Err(FResult::InvalidName);
+    }
+
+    // FatFs native API doesn't know the `/usb/` convenience prefix the
+    // POSIX shim uses — it wants `0:/...` (drive 0, since FF_VOLUMES == 1
+    // and FF_STR_VOLUME_ID == 0 rules out string IDs like "USB:").
+    let rest = &bytes[b"/usb".len()..]; // keeps the leading '/'
+    let mut native_path: CString<64> = CString::new();
+    native_path
+        .extend_from_bytes(b"0:")
+        .map_err(|_| FResult::InvalidName)?;
+    native_path
+        .extend_from_bytes(rest)
+        .map_err(|_| FResult::InvalidName)?;
+
+    let mut info = core::mem::MaybeUninit::<FilInfo>::uninit();
+    let res = unsafe { f_stat(native_path.as_ptr(), info.as_mut_ptr()) };
+
+    if res != FResult::Ok {
+        return Err(res);
+    }
+
+    let info = unsafe { info.assume_init() };
+    Ok(info)
 }
 
 /// A Rust safe wrapper around a file.
@@ -218,4 +314,17 @@ pub fn test_file() {
         f.close();
         log_info!("Test File Closed");
     }
+}
+
+/// Create the full file path for a given uuid.
+pub fn make_path(job_guid: &Uuid, partial: bool) -> CString<64> {
+    let mut path = CString::<64>::new();
+    let _ = path.extend_from_bytes(b"/usb/");
+    let _ = path.extend_from_bytes(job_guid.to_string().as_bytes());
+    if partial {
+        let _ = path.extend_from_bytes(b".partial");
+    } else {
+        let _ = path.extend_from_bytes(b".gcode");
+    }
+    path
 }

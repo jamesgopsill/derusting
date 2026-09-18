@@ -94,6 +94,11 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
         log_error!("We should only be called within a FreeRTOS task.");
     }
 
+    match fs::stat(c"/usb/firmware.bbf") {
+        Ok(info) => log_info!("bbf file_size: {}", info.fsize),
+        Err(e) => log_error!("stat error: {e}"),
+    }
+
     log_info!("Is Ready: {}", is_ready());
     set_offline();
 
@@ -109,9 +114,9 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut RtosTaskParams) -> ! {
 }
 
 pub const ADDRESS_BOOK_ENTRIES: usize = 32;
-pub const UDP_CHANNEL_SIZE: usize = 8;
+pub const UDP_CHANNEL_SIZE: usize = 12;
 pub const MAX_TCP_CONNECTIONS: usize = 1;
-pub const MAX_TCP_CONNECTION_CHANNEL_SIZE: usize = 8;
+pub const MAX_TCP_CONNECTION_CHANNEL_SIZE: usize = 12;
 
 static ADDRESS_BOOK: AddressBook<ADDRESS_BOOK_ENTRIES> = AsyncMutex::new(LinearMap::new());
 static JOB_LEDGER: JobLedger = AsyncMutex::new(None);
