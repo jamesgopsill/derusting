@@ -23,6 +23,11 @@ impl Driver for FreeRtosTimeDriver {
     // own timekeeper.
     fn now(&self) -> u64 {
         critical_section::with(|_cs| {
+            // SAFETY: `xTaskGetTickCount` takes no arguments and is safe to
+            // call from any context; it is read here inside a critical
+            // section purely to keep the read-modify-write of
+            // `free_rtos_now`/`timekeeper` atomic with respect to this
+            // function, not because the call itself needs protecting.
             let free_rtos_now = unsafe { xTaskGetTickCount() };
             let previous_free_rtos_now = self.free_rtos_now.load(Ordering::SeqCst);
             let tick_diff = free_rtos_now.wrapping_sub(previous_free_rtos_now);
@@ -62,6 +67,14 @@ impl FreeRtosTimeDriver {
         let now_ticks = self.now();
         let exp_ticks = self.next_expiration();
         let diff_ticks = exp_ticks.saturating_sub(now_ticks);
+        // SAFETY: `ulTaskGenericNotifyTake` takes only plain integer
+        // arguments and must be called from the task that will be
+        // notified, which is this executor's own FreeRTOS task (see
+        // `FreeRtosTaskExecutor::run`, the only caller of this function).
+        // Note: `diff_ticks` (a `u64`) is narrowed to `u32` here; when no
+        // timer is scheduled `exp_ticks` is very large (queue "no
+        // expiration" sentinel) and this cast can wrap, which may not wait
+        // as long as intended.
         unsafe { ulTaskGenericNotifyTake(0, 1, diff_ticks as u32) };
         let _ = self.next_expiration();
     }

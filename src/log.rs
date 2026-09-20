@@ -24,6 +24,11 @@ unsafe extern "C" {
 pub fn log(severity: Severity, args: core::fmt::Arguments) {
     let mut msg = format!("{}", args);
     msg.push('\0');
+    // SAFETY: `derusting_log_event` (see libderusting.cpp) forwards `msg`
+    // to a "%s"-style logger, so it must point to a valid, nul-terminated
+    // byte string for the duration of this call. We just appended '\0' to
+    // `msg` above and the pointer stays valid until `msg` is dropped after
+    // this call returns.
     unsafe { derusting_log_event(severity, msg.as_ptr() as *const _) };
 }
 

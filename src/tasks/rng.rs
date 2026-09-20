@@ -22,10 +22,15 @@ unsafe extern "C" {
 }
 
 #[unsafe(no_mangle)]
+/// # Safety
+/// Called by the `getrandom` crate as its custom backend; `dest` must be
+/// valid for writes of `len` bytes for the duration of this call (the
+/// crate upholds this for every call site it generates).
 unsafe extern "Rust" fn __getrandom_v03_custom(
     dest: *mut u8,
     len: usize,
 ) -> Result<(), getrandom::Error> {
+    // SAFETY: valid per this function's Safety contract above.
     let buf = unsafe { core::slice::from_raw_parts_mut(dest, len) };
 
     let mut i = 0;
@@ -34,6 +39,13 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
 
         // 2. Call the STM32 HAL
         // Note: Using &hrng to get the address of the pointer/struct
+        //
+        // SAFETY: `hrng` is a `'static` HAL-owned handle and `&mut
+        // random_val` is a valid, writable local we own for the call.
+        // This assumes the HAL only ever returns one of `HalStatus`'s
+        // defined discriminants (0-3); a `#[repr(u32)]` enum received
+        // directly as an `extern "C"` return value is undefined behaviour
+        // if the C side ever produces any other value.
         let status =
             unsafe { HAL_RNG_GenerateRandomNumber(&hrng as *const c_void, &mut random_val) };
 

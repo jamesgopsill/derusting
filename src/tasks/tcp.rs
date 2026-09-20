@@ -29,8 +29,11 @@ pub async fn tcp_worker(
     ledger: &'static JobLedger,
 ) {
     loop {
-        tcp.with_connection(async |conn| handle_conn(conn, udp, address_book, ledger).await)
-            .await
+        tcp.with_connection(async |conn| {
+            log_info!("New Connection Received");
+            handle_conn(conn, udp, address_book, ledger).await
+        })
+        .await
     }
 }
 

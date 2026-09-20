@@ -19,6 +19,8 @@ unsafe extern "C" {
 
 /// Is the printer idling.
 pub fn is_idle() -> bool {
+    // SAFETY: `derusting_is_idle` takes no arguments and just reads
+    // Marlin's internal state; safe to call from any context.
     unsafe { derusting_is_idle() }
 }
 
@@ -42,11 +44,15 @@ pub fn print(path: &CStr, dry: bool) -> Result<(), Error> {
         cmd.extend_from_bytes(b"M32 ")?;
         cmd.extend_from_bytes(path.to_bytes())?;
         if dry {
+            // SAFETY: `c"M111 S8"` is a `'static` nul-terminated C string
+            // literal, valid for the duration of the call.
             let res = unsafe { derusting_gcode_cmd(c"M111 S8".as_ptr()) };
             if !res {
                 return Err(Error::MarlinReturnedFalse);
             }
         }
+        // SAFETY: `cmd` is a `heapless::CString` we just built above; its
+        // buffer is nul-terminated and remains valid for this call.
         let res = unsafe { derusting_gcode_cmd(cmd.as_ptr()) };
         if res {
             Ok(())
@@ -63,6 +69,7 @@ pub fn print(path: &CStr, dry: bool) -> Result<(), Error> {
 pub fn home() -> Result<(), Error> {
     if is_idle() {
         log_info!("Home called");
+        // SAFETY: `c"G28"` is a `'static` nul-terminated C string literal.
         let res = unsafe { derusting_gcode_cmd(c"G28".as_ptr()) };
         if res {
             Ok(())
@@ -77,12 +84,19 @@ pub fn home() -> Result<(), Error> {
 /// A flag that enables a technician to say the printer is ready
 /// to manufacture new jobs.
 pub fn is_ready() -> bool {
+    // SAFETY: `derusting_ready_flag` is a `static` `AtomicBool` defined on
+    // the C++ side; referencing a `static` atomic across an FFI boundary is
+    // sound as long as it is defined exactly once and never moved, which is
+    // guaranteed for a linker-provided static.
     unsafe { derusting_ready_flag.load(core::sync::atomic::Ordering::SeqCst) }
 }
 
 /// We need to set the read_flag to false when a job has been selected by the
 /// machine for manufacture.
 pub fn set_offline() {
+    // SAFETY: see `is_ready` above for why referencing this static is sound.
     unsafe { derusting_ready_flag.store(false, core::sync::atomic::Ordering::SeqCst) };
+    // SAFETY: `derusting_update_ui` takes no arguments; it is documented as
+    // safe to call whenever the ready flag has changed.
     unsafe { derusting_update_ui() };
 }

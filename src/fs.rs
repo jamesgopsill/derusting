@@ -152,6 +152,10 @@ where
         log_error!("Path must start with /usb/");
         return Err(());
     }
+    // SAFETY: `path` and `mode.as_cstr()` are both valid, nul-terminated C
+    // strings for the duration of the call. `fopen` returns either null or
+    // a pointer owned by the C runtime that we take ownership of via `File`
+    // (closed in `File::drop`).
     let res = unsafe { fopen(path.as_ptr(), mode.as_cstr().as_ptr()) };
     if res.is_null() {
         Err(())
@@ -164,10 +168,12 @@ where
 }
 
 pub fn delete(path: &CStr) -> c_int {
+    // SAFETY: `path` is a valid, nul-terminated C string for the call.
     unsafe { unlink(path.as_ptr()) }
 }
 
 pub fn rname(old_path: &CStr, new_path: &CStr) -> c_int {
+    // SAFETY: `old_path`/`new_path` are valid, nul-terminated C strings.
     unsafe { rename(old_path.as_ptr(), new_path.as_ptr()) }
 }
 
@@ -191,12 +197,19 @@ pub fn stat(path: &CStr) -> Result<FilInfo, FResult> {
         .map_err(|_| FResult::InvalidName)?;
 
     let mut info = core::mem::MaybeUninit::<FilInfo>::uninit();
+    // SAFETY: `native_path` is a valid, nul-terminated C string, and
+    // `info.as_mut_ptr()` points to a live `FilInfo`-sized allocation that
+    // `f_stat` is documented to fully initialise whenever it returns
+    // `FResult::Ok` (see the FatFs `FILINFO`/`f_stat` contract this struct
+    // mirrors).
     let res = unsafe { f_stat(native_path.as_ptr(), info.as_mut_ptr()) };
 
     if res != FResult::Ok {
         return Err(res);
     }
 
+    // SAFETY: only reached when `f_stat` returned `FResult::Ok` above, at
+    // which point it has fully written `info`, so `assume_init` is sound.
     let info = unsafe { info.assume_init() };
     Ok(info)
 }
@@ -241,6 +254,10 @@ impl<T: Mode> embedded_io::ErrorType for File<T> {
 /// it implements `ImplementsEmbeddedIoRead`.
 impl<T: Mode + ImplementsEmbeddedIoRead> embedded_io::Read for File<T> {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        // SAFETY: `self.fp` is a live `Fil*` for as long as `self` exists
+        // (only closed in `Drop`), and `buf` is a valid, writable slice of
+        // `buf.len()` bytes that `fread` will write at most that many
+        // bytes into.
         let read = unsafe { fread(buf.as_mut_ptr(), 1, buf.len(), self.fp) };
         Ok(read)
     }
@@ -253,11 +270,14 @@ impl<T: Mode + ImplementsEmbeddedIoWrite> embedded_io::Write for File<T> {
         if buf.is_empty() {
             return Ok(0);
         }
+        // SAFETY: `self.fp` is a live `Fil*` for as long as `self` exists,
+        // and `buf` is a valid, readable slice of `buf.len()` bytes.
         let written = unsafe { fwrite(buf.as_ptr(), 1, buf.len(), self.fp) };
         Ok(written)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
+        // SAFETY: `self.fp` is a live `Fil*` for as long as `self` exists.
         let res = unsafe { fflush(self.fp) };
         if res > 0 {
             Err(Self::Error::IoError)
@@ -276,10 +296,13 @@ impl<T: Mode> embedded_io::Seek for File<T> {
             embedded_io::SeekFrom::End(o) => (o as c_long, 2),   // SEEK_END
         };
 
+        // SAFETY: `self.fp` is a live `Fil*` for as long as `self` exists;
+        // `offset`/`whence` are plain integers with no aliasing concerns.
         if unsafe { fseek(self.fp, offset, whence) } != 0 {
             return Err(Error::IoError);
         }
 
+        // SAFETY: `self.fp` is still a live `Fil*` at this point.
         let tell = unsafe { ftell(self.fp) };
         if tell < 0 {
             Err(Error::IoError)
@@ -295,6 +318,9 @@ where
     T: Mode,
 {
     fn drop(&mut self) {
+        // SAFETY: `self.fp` is a live `Fil*` opened by `open()` and not yet
+        // closed (this is the only place that closes it); `File` is not
+        // `Copy`/`Clone` so this runs at most once per underlying handle.
         unsafe { fclose(self.fp) };
     }
 }
