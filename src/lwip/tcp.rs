@@ -89,8 +89,8 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
         // is called.
         let listener = unsafe { &*(arg as *const TcpListener<N, M>) };
 
-        // 1. Tell lwIP to refuse & buffer incoming packets on this PCB
-        //    until the application task attaches its real receiver.
+        // Tell lwIP to refuse & buffer incoming packets on this PCB
+        // until the application task attaches its real receiver.
         // SAFETY: we're in a lwIP callback (core lock held) and `pcb` is
         // the non-null pcb lwIP just handed us.
         unsafe {

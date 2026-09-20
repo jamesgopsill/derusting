@@ -98,7 +98,7 @@ impl<const N: usize> UdpSocket<N> {
         self.channel.receive().await
     }
 
-    /// The callback handler for receiving UPD packets.
+    /// The callback handler for receiving UDP packets.
     ///
     /// # Safety
     /// Called by lwIP as a `udp_recv_fn`; `arg` must be either null or the
@@ -146,8 +146,10 @@ impl<const N: usize> Drop for UdpSocket<N> {
         // scenario where this can be a null pcb.
         let _ = super::blocking_lwip(|| unsafe {
             let pcb = self.pcb.swap(core::ptr::null_mut(), Ordering::AcqRel);
-            udp_recv(pcb, None, core::ptr::null_mut());
-            udp_remove(pcb);
+            if !pcb.is_null() {
+                udp_recv(pcb, None, core::ptr::null_mut());
+                udp_remove(pcb);
+            }
             Ok(())
         });
     }

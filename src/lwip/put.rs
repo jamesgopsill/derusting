@@ -135,10 +135,6 @@ impl PutRequest {
         // pointee, the same stack slot the caller `pin!`'d.
         let this = unsafe { self.get_unchecked_mut() };
         super::async_lwip(|| unsafe {
-            let pcb = this.pcb.load(core::sync::atomic::Ordering::Acquire);
-            if pcb.is_null() {
-                return Err(err_t::Val);
-            }
             // SAFETY (this closure): runs inside `async_lwip`, i.e. on the
             // lwIP thread with `lock_tcpip_core` held, as required by
             // `tcp_new`/`tcp_arg`/`tcp_sent`/`tcp_recv`/`tcp_connect`.
@@ -154,11 +150,12 @@ impl PutRequest {
             tcp_arg(pcb, this.as_mut_ptr());
             tcp_sent(pcb, Some(Self::_sent));
             tcp_recv(pcb, Some(Self::_recv));
+            tcp_err(pcb, Some(Self::_err));
             let addr = this.addr.to_bits();
             let addr = ip_addr_t { addr };
             let err = tcp_connect(pcb, &addr, this.port, Self::_connected);
             if err == err_t::Ok {
-                this.pcb.store(pcb, Ordering::Acquire);
+                this.pcb.store(pcb, Ordering::Release);
                 Ok(())
             } else {
                 Err(err)
@@ -259,6 +256,16 @@ Connection: close\r\n\r\n",
         this.signal.signal(err_t::Ok);
         err_t::Ok
     }
+
+    unsafe extern "C" fn _err(arg: *mut c_void, err: err_t) {
+        if arg.is_null() {
+            return;
+        }
+        // SAFETY: see `_connected`.
+        let this = unsafe { &mut *(arg as *mut PutRequest) };
+        this.pcb.store(core::ptr::null_mut(), Ordering::Release);
+        this.signal.signal(err);
+    }
 }
 
 impl Drop for PutRequest {
@@ -271,13 +278,15 @@ impl Drop for PutRequest {
         // practice whenever `drop` runs after a successful `send()`.
         let _ = super::blocking_lwip(|| unsafe {
             let pcb = self.pcb.swap(core::ptr::null_mut(), Ordering::AcqRel);
-            tcp_arg(pcb, core::ptr::null_mut());
-            tcp_sent(pcb, None);
-            tcp_recv(pcb, None);
-            let err = tcp_close(pcb);
-            if err != err_t::Ok {
-                log_error!("PutRequest Failed to Close: {err}");
-            };
+            if !pcb.is_null() {
+                tcp_arg(pcb, core::ptr::null_mut());
+                tcp_sent(pcb, None);
+                tcp_recv(pcb, None);
+                let err = tcp_close(pcb);
+                if err != err_t::Ok {
+                    log_error!("PutRequest Failed to Close: {err}");
+                };
+            }
             Ok(())
         });
     }

@@ -16,6 +16,12 @@ unsafe impl GlobalAlloc for FreeRtosAllocator {
         // trait contract) requires the returned pointer to also satisfy
         // `layout.align()`; we rely on FreeRTOS's heap giving out memory
         // aligned to `portBYTE_ALIGNMENT` and do not further validate that.
+        // FreeRTOS's heap only guarantees portBYTE_ALIGNMENT (8 bytes on
+        // Cortex-M); refuse anything stricter rather than silently
+        // returning under-aligned memory.
+        if layout.align() > 8 {
+            return core::ptr::null_mut();
+        }
         unsafe { pvPortMalloc(layout.size()) }
     }
 

@@ -18,7 +18,7 @@ unsafe extern "C" {
     // Hardware RNG
     static hrng: c_void;
     // The hardware rng fcn.
-    fn HAL_RNG_GenerateRandomNumber(hrng_ptr: *const c_void, random: *mut u32) -> HalStatus;
+    fn HAL_RNG_GenerateRandomNumber(hrng_ptr: *const c_void, random: *mut u32) -> u32;
 }
 
 #[unsafe(no_mangle)]
@@ -50,7 +50,7 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
             unsafe { HAL_RNG_GenerateRandomNumber(&hrng as *const c_void, &mut random_val) };
 
         match status {
-            HalStatus::Ok => {
+            x if x == HalStatus::Ok as u32 => {
                 let bytes = random_val.to_le_bytes();
                 let remaining = buf.len() - i;
                 let take = core::cmp::min(remaining, 4);
@@ -59,7 +59,9 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
             }
             // If the hardware is busy (processing entropy), we can try again
             // or return a retry error. For simplicity, we loop/retry.
-            HalStatus::Busy => continue,
+            // NOTE: Could continually loop if the hardware got stuck. Should
+            // introduce a bounded retry.
+            x if x == HalStatus::Busy as u32 => continue,
             _ => {
                 // Return a custom error if the RNG hardware has a
                 // Clock Error or Seed Error.

@@ -124,6 +124,7 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
                 while content_length > 0 {
                     let Some(pbuf) = conn.as_ref().receive().await else {
                         log_error!("Handle Reset");
+                        f.close();
                         fs::delete(&path);
                         return;
                     };

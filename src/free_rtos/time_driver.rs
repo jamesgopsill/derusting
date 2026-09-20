@@ -67,6 +67,7 @@ impl FreeRtosTimeDriver {
         let now_ticks = self.now();
         let exp_ticks = self.next_expiration();
         let diff_ticks = exp_ticks.saturating_sub(now_ticks);
+        let diff_ticks = diff_ticks.min(u32::MAX as u64);
         // SAFETY: `ulTaskGenericNotifyTake` takes only plain integer
         // arguments and must be called from the task that will be
         // notified, which is this executor's own FreeRTOS task (see
