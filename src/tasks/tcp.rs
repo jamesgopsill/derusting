@@ -73,11 +73,11 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
 
     match method {
         Method::Get => {
-            log_info!("/ GET request");
+            log_info!("/ GET request received");
             let _ = conn.response(INDEX_HTML.as_bytes()).await;
         }
         Method::Put => {
-            log_info!("/ PUT request");
+            log_info!("/ PUT request received");
 
             let info = check_put_header(headers);
             if !info.is_gcode
@@ -206,6 +206,12 @@ pub struct PutInfo {
 
 /// Analyses the PUT header to ensure it features the information
 /// we require to process the request.
+//
+// Checked 2026-09-21: browser fetch() does in fact send `Content-Type:
+// text/x.gcode` for the bundled upload form despite no explicit header in
+// assets/index.html's JS, so `is_gcode` below is not the issue - false
+// alarm, not the cause of the NS_ERROR_NET_RESET failures (see the BUG
+// note on `TcpConnection::Drop` in src/lwip/tcp.rs for that).
 fn check_put_header(headers: &str) -> PutInfo {
     let mut info = PutInfo {
         size: None,

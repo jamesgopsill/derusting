@@ -188,7 +188,7 @@ async fn embassy_main(spawner: Spawner) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     }
-    for _i in 0..2 {
+    for _i in 0..1 {
         match tcp_worker(tcp, udp, address_book, ledger) {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),

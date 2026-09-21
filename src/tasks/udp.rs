@@ -19,7 +19,7 @@ use crate::{log_error, log_info};
 pub async fn heartbeat(udp: &'static UdpSocket<UDP_CHANNEL_SIZE>) {
     loop {
         if let Some(addr) = my_ipaddr() {
-            log_info!("[{:?}] heartbeat()", addr);
+            // log_info!("[{:?}] heartbeat()", addr);
         } else {
             log_info!("[Unknown] heartbeat()");
         }

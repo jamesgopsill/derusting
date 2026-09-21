@@ -118,13 +118,11 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
     /// context.
     unsafe extern "C" fn _hold_recv(
         _arg: *mut c_void,
-        _pcb: *mut pcb,
+        pcb: *mut pcb,
         _pbuf: *mut pbuf,
         _err: err_t,
     ) -> err_t {
-        log_info!("_hold_recv: refusing data until conn is pinned");
-        // Telling lwIP ERR_MEM instructs it to store the pbuf
-        // in `pcb->refused_data` instead of discarding it!
+        log_info!("[{pcb:p}] _hold_recv()");
         err_t::Mem
     }
 
@@ -204,7 +202,9 @@ impl<const N: usize> TcpConnection<N> {
             tcp_recv(pcb, Some(Self::_recv));
             tcp_err(pcb, Some(Self::_err));
             tcp_sent(pcb, Some(Self::_sent));
-            tcp_process_refused_data(pcb);
+            if derusting_tcp_has_refused_data(pcb) {
+                tcp_process_refused_data(pcb);
+            }
             Ok(())
         })
         .await
@@ -266,11 +266,11 @@ impl<const N: usize> TcpConnection<N> {
     /// to `conn.channel`).
     unsafe extern "C" fn _recv(
         arg: *mut c_void,
-        _pcb: *mut pcb,
+        pcb: *mut pcb,
         pbuf: *mut pbuf,
         _err: err_t,
     ) -> err_t {
-        log_info!("_recv()");
+        log_info!("[{pcb:p}] _recv()");
         if arg.is_null() {
             if !pbuf.is_null() {
                 // SAFETY: `pbuf` is non-null and owned by this callback
@@ -284,12 +284,9 @@ impl<const N: usize> TcpConnection<N> {
         let conn = unsafe { &*(arg as *const TcpConnection<N>) };
 
         if pbuf.is_null() {
-            // TODO: Debug - Should be null when closed but return null
-            // early PUT stream so ignore it and it works. Need to work
-            // out connection drops.
             log_info!("Remote closed connection (EOF / FIN received)");
             // Push None to notify readers on `receive()` that stream has ended
-            // let _ = conn.channel.try_send(None);
+            let _ = conn.channel.try_send(None);
             // Per lwIP docs, you MUST return ERR_OK when pbuf is NULL
             return err_t::Ok;
         }
@@ -343,6 +340,16 @@ impl<const N: usize> Drop for TcpConnection<N> {
         let _ = super::blocking_lwip(|| unsafe {
             let pcb = self.pcb.swap(core::ptr::null_mut(), Ordering::AcqRel);
             if !pcb.is_null() {
+                // last chance to drain any data.
+                if derusting_tcp_has_refused_data(pcb) {
+                    tcp_process_refused_data(pcb);
+                }
+                while let Ok(item) = self.channel.try_receive() {
+                    if let Some(pkt) = item {
+                        tcp_recved(pcb, pkt.total_len());
+                        // pkt drops here -> pbuf_free, as today
+                    }
+                }
                 tcp_recv(pcb, None);
                 tcp_err(pcb, None);
                 tcp_sent(pcb, None);

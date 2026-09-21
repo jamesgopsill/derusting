@@ -56,7 +56,6 @@
     try {
       let r = await fetch('/', {
         method: 'PUT',
-        headers: {'x-fname': file.name},
         body: file
       });
       alert(r.ok ? 'Sent' : 'Error');

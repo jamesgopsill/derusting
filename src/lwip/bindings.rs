@@ -146,6 +146,8 @@ unsafe extern "C" {
 
     pub(super) fn derusting_holds_tcpip_core_lock() -> bool;
 
+    pub(super) fn derusting_tcp_has_refused_data(pcb: *const pcb) -> bool;
+
     // --- TCP Control ---
 
     /// Creates a new TCP Protocol Control Block (PCB). Returns NULL if out of memory.

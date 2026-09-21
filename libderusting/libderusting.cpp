@@ -37,3 +37,9 @@ extern "C" bool derusting_holds_tcpip_core_lock(void) {
     return false;
   #endif
 }
+
+// libderusting.cpp
+extern "C" bool derusting_tcp_has_refused_data(const struct tcp_pcb *pcb) {
+  return pcb->refused_data != nullptr;
+}
+
