@@ -1,5 +1,6 @@
 use super::bindings::*;
 
+/// A safe wrapper around a non-null `*const ip_addr_t`.
 #[allow(unused)]
 pub struct IpAddr {
     inner: *const ip_addr_t,
@@ -7,6 +8,7 @@ pub struct IpAddr {
 
 #[allow(unused)]
 impl IpAddr {
+    /// The raw address, in lwIP's network byte order.
     pub fn addr(&self) -> u32 {
         // SAFETY: `self.inner` is non-null (enforced by `TryFrom`), but
         // note this type carries no lifetime tying it to the pointee, so
@@ -16,6 +18,7 @@ impl IpAddr {
     }
 }
 
+/// The error produced when converting a null pointer into an `IpAddr`.
 #[allow(unused)]
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

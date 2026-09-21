@@ -1,6 +1,7 @@
 use core::panic::PanicInfo;
 
 unsafe extern "C" {
+    /// The firmware's `abort` routine, invoked to terminate on panic.
     fn abort() -> !;
 }
 

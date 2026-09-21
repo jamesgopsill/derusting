@@ -13,6 +13,8 @@ pub mod put;
 pub mod tcp;
 pub mod udp;
 
+/// Returns this machine's current IPv4 address, or `None` if the default
+/// network interface has not yet been assigned one.
 pub fn my_ipaddr() -> Option<Ipv4Addr> {
     // SAFETY: `netif_default` is a lwIP-owned global raw pointer; reading it
     // (not dereferencing) is safe, and we check it for null before ever
@@ -27,6 +29,8 @@ pub fn my_ipaddr() -> Option<Ipv4Addr> {
     Some(addr)
 }
 
+/// Holds the closure and completion signal used to bridge an `async_lwip`
+/// call across to lwIP's own thread and back.
 struct ThreadContext<F>
 where
     F: FnMut() -> Result<(), err_t>,
@@ -82,6 +86,8 @@ where
     ctx.signal.wait().await
 }
 
+/// Runs `closure` with lwIP's core lock held, taking the lock first unless
+/// we already hold it (e.g. because we're already on the lwIP thread).
 pub fn blocking_lwip<F, R>(mut closure: F) -> Result<R, err_t>
 where
     F: FnMut() -> Result<R, err_t>,

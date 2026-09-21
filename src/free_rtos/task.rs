@@ -70,6 +70,7 @@ impl Task {
         Self { inner: task }
     }
 
+    /// Returns the raw FreeRTOS task handle this `Task` wraps.
     #[allow(unused)]
     pub fn as_mut_ptr(&self) -> *mut BaseType_t {
         self.inner
@@ -89,6 +90,7 @@ impl TryFrom<*mut BaseType_t> for Task {
     }
 }
 
+/// Turn an atomically-stored FreeRTOS task handle into a safe `Task`.
 impl TryFrom<&AtomicPtr<BaseType_t>> for Task {
     type Error = ();
 

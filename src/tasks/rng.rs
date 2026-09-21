@@ -72,6 +72,8 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
     Ok(())
 }
 
+/// Generates a UUIDv7, timestamped from time-since-boot and seeded with
+/// the STM32 hardware RNG.
 pub fn generate_uuid_v7() -> Uuid {
     // Get time since boot (ms)
     let now_ms = Instant::now().as_millis();

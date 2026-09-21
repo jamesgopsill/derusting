@@ -143,6 +143,8 @@ static UDP: StaticCell<UdpSocket<UDP_CHANNEL_SIZE>> = StaticCell::new();
 static TCP: StaticCell<TcpListener<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>> =
     StaticCell::new();
 
+/// The main Embassy task: brings up UDP/TCP, waits for an IP address, then
+/// spawns the heartbeat, address-book, ledger and TCP worker tasks.
 #[embassy_executor::task(pool_size = 1)]
 async fn embassy_main(spawner: Spawner) {
     log_stack_and_heap_size();
@@ -196,6 +198,8 @@ async fn embassy_main(spawner: Spawner) {
     }
 }
 
+/// Logs the current task's free stack headroom and the FreeRTOS heap's
+/// free byte count, for diagnosing stack/heap pressure.
 fn log_stack_and_heap_size() {
     // SAFETY: `uxTaskGetStackHighWaterMark` accepts a null handle to mean
     // "the calling task"; this function is only ever called from inside the

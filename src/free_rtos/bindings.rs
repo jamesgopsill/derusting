@@ -1,10 +1,15 @@
 #![allow(unused, non_camel_case_types)]
 use core::ffi::{c_char, c_void};
 
+/// Opaque handle type for a FreeRTOS task, as returned by e.g.
+/// `xTaskCreate`/`xTaskCreateStatic`.
 pub type BaseType_t = c_void;
+/// Opaque pointer type for the argument passed to a task's entry function.
 pub type pvParameters = c_void;
+/// The entry-point signature FreeRTOS expects for a task function.
 pub type TaskFunction_t = unsafe extern "C" fn(*mut pvParameters) -> !;
 
+/// Error codes returned by our FreeRTOS task-creation bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[repr(i32)]
 pub enum FreeRtosError {

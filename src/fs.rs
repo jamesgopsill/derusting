@@ -110,6 +110,7 @@ unsafe extern "C" {
 
 /// A trait the produces the necesary flags for `fopen`
 pub trait Mode {
+    /// The `fopen`-style mode string (e.g. `"rb"`) for this mode.
     fn as_cstr(&self) -> &'static CStr;
 }
 
@@ -167,16 +168,20 @@ where
     }
 }
 
+/// Delete a file at the given path.
 pub fn delete(path: &CStr) -> c_int {
     // SAFETY: `path` is a valid, nul-terminated C string for the call.
     unsafe { unlink(path.as_ptr()) }
 }
 
+/// Rename or move a file from `old_path` to `new_path`.
 pub fn rname(old_path: &CStr, new_path: &CStr) -> c_int {
     // SAFETY: `old_path`/`new_path` are valid, nul-terminated C strings.
     unsafe { rename(old_path.as_ptr(), new_path.as_ptr()) }
 }
 
+/// Get filesystem metadata (size, timestamps, name) for a file on the USB
+/// stick.
 pub fn stat(path: &CStr) -> Result<FilInfo, FResult> {
     let bytes = path.to_bytes();
     if !bytes.starts_with(b"/usb/") {
@@ -325,6 +330,8 @@ where
     }
 }
 
+/// Manual smoke test that opens, writes to, and closes a file on the USB
+/// stick.
 #[allow(unused)]
 pub fn test_file() {
     if let Ok(mut f) = open(c"/usb/test.txt", WriteBytes) {

@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use crate::{log_error, log_info};
 
+/// Opaque handle to an lwIP protocol control block (TCP or UDP).
 #[repr(C)]
 pub struct pcb {
     _unused: [u8; 0],
@@ -16,6 +17,7 @@ pub struct ip_addr_t {
     pub addr: u32,
 }
 
+/// Mirrors lwIP's `pbuf` struct: a node in a chain of packet buffers.
 #[repr(C)]
 pub struct pbuf {
     pub next: *mut pbuf,
@@ -27,6 +29,8 @@ pub struct pbuf {
     ref_count: u16,
 }
 
+/// Mirrors (the leading fields of) lwIP's `netif` struct: a network
+/// interface.
 #[repr(C)]
 pub struct netif {
     pub next: *mut netif,
@@ -36,11 +40,13 @@ pub struct netif {
     // ...
 }
 
+/// Opaque handle to lwIP's platform mutex type.
 #[repr(C)]
 pub struct sys_mutex_t {
     _opaque: [u8; 0],
 }
 
+/// Mirrors lwIP's `err_t` error codes, returned by most lwIP API calls.
 #[repr(i8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum err_t {
@@ -97,18 +103,30 @@ const PBUF_TYPE_ALLOC_SRC_MASK_STD_MEMP_PBUF: u32 = 0x01;
 const PBUF_TYPE_ALLOC_SRC_MASK_STD_MEMP_PBUF_POOL: u32 = 0x02;
 const PBUF_TYPE_ALLOC_SRC_MASK_APP_MIN: u32 = 0x03;
 
+/// Callback signature lwIP invokes via `tcp_accept` when a new connection
+/// arrives on a listening pcb.
 pub type tcp_accept_fn = unsafe extern "C" fn(arg: *mut c_void, pcb: *mut pcb, err: err_t) -> err_t;
 
+/// Callback signature lwIP invokes via `tcp_recv` when data (or EOF, as a
+/// null `pbuf`) arrives on a pcb.
 pub type tcp_recv_fn =
     unsafe extern "C" fn(arg: *mut c_void, pcb: *mut pcb, pbuf: *mut pbuf, err: err_t) -> err_t;
 
+/// Callback signature lwIP invokes via `tcp_sent` when previously written
+/// data has been acknowledged by the remote host.
 pub type tcp_sent_fn = unsafe extern "C" fn(arg: *mut c_void, pcb: *mut pcb, len: u16) -> err_t;
 
+/// Callback signature lwIP invokes via `tcp_connect` once the outbound
+/// connection completes (or fails).
 pub type tcp_connected_fn =
     unsafe extern "C" fn(arg: *mut c_void, pcb: *mut pcb, err: err_t) -> err_t;
 
+/// Callback signature lwIP invokes via `tcp_err` on a fatal pcb error; the
+/// pcb itself has already been freed by lwIP when this fires.
 pub type tcp_err_fn = unsafe extern "C" fn(arg: *mut c_void, err: err_t);
 
+/// Callback signature lwIP invokes via `udp_recv` when a UDP datagram
+/// arrives.
 pub type udp_recv_fn = unsafe extern "C" fn(
     arg: *mut c_void,
     pcb: *mut pcb,
@@ -117,8 +135,12 @@ pub type udp_recv_fn = unsafe extern "C" fn(
     port: u16,
 );
 
+/// Callback signature for a fatal UDP pcb error (unused by lwIP's UDP API
+/// today, but part of the binding surface for parity with TCP).
 pub type udp_err_fn = unsafe extern "C" fn(arg: *mut c_void, err: err_t);
 
+/// The protocol layer to reserve header space for when allocating a pbuf
+/// with `pbuf_alloc`.
 #[repr(u32)]
 pub enum pbuf_layer {
     Transport = PBUF_LINK_ENCAPSULATION_HLEN + PBUF_LINK_HLEN + PBUF_IP_HLEN + PBUF_TRANSPORT_HLEN,
@@ -127,6 +149,8 @@ pub enum pbuf_layer {
     Raw = PBUF_LINK_ENCAPSULATION_HLEN,
 }
 
+/// How/where a pbuf's backing storage is allocated, passed to
+/// `pbuf_alloc`.
 #[repr(u32)]
 pub enum pbuf_type {
     Ram = PBUF_ALLOC_FLAG_DATA_CONTIGUOUS
@@ -142,10 +166,15 @@ pub enum pbuf_type {
 unsafe extern "C" {
     // -- Own wrappers
 
+    /// Returns how many bytes are currently free in the pcb's send buffer.
     pub(super) fn derusting_tcp_sndbuf(pcb: *const pcb) -> u16;
 
+    /// Whether the calling task already holds lwIP's `lock_tcpip_core`
+    /// mutex.
     pub(super) fn derusting_holds_tcpip_core_lock() -> bool;
 
+    /// Whether the pcb is currently holding data lwIP refused to deliver
+    /// (i.e. there is buffered data waiting on `tcp_process_refused_data`).
     pub(super) fn derusting_tcp_has_refused_data(pcb: *const pcb) -> bool;
 
     // --- TCP Control ---
@@ -166,8 +195,11 @@ unsafe extern "C" {
     /// Sets the custom program argument (void*) that will be passed to all callbacks for this PCB.
     pub(super) fn tcp_arg(pcb: *mut pcb, arg: *mut c_void);
 
+    /// Aborts the connection and frees the PCB, sending a RST to the peer.
     pub(super) fn tcp_abort(pcb: *mut pcb);
 
+    /// Opens an outbound connection to `addr`:`port`; `callback` fires once
+    /// it completes or fails.
     pub(super) fn tcp_connect(
         pcb: *mut pcb,
         addr: *const ip_addr_t,
@@ -265,5 +297,7 @@ unsafe extern "C" {
         ctx: *mut c_void,
     ) -> err_t;
 
+    /// Re-delivers data previously refused by the receive callback (see
+    /// `derusting_tcp_has_refused_data`) once the application is ready.
     pub(super) fn tcp_process_refused_data(pcb: *mut pcb) -> err_t;
 }

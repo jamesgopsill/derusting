@@ -11,6 +11,8 @@ use crate::{
     lwip::{bindings::*, packet_buffer::PacketBuffer},
 };
 
+/// A UDP socket bound to a single port, with received datagrams delivered
+/// through an internal channel.
 pub struct UdpSocket<const N: usize> {
     pcb: AtomicPtr<pcb>,
     channel: Channel<CriticalSectionRawMutex, (Ipv4Addr, PacketBuffer), N>,

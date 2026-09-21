@@ -197,6 +197,8 @@ fn check_start_line(start_line: &str) -> Result<Method, &'static str> {
     Ok(method)
 }
 
+/// The fields extracted from a PUT request's headers by
+/// `check_put_header`.
 #[derive(Debug)]
 pub struct PutInfo {
     pub size: Option<usize>,
@@ -239,6 +241,8 @@ fn check_put_header(headers: &str) -> PutInfo {
     info
 }
 
+/// If we own the ledger, adds the new job to it; otherwise alerts the
+/// network to the new job, unless we're the only machine around.
 async fn append_to_ledger<const N1: usize, const N2: usize>(
     guid: Uuid,
     address_book: &AddressBook<N1>,
@@ -278,6 +282,7 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
     }
 }
 
+/// Sends the given job's file to every other known machine on the network.
 async fn distribute_file<const N1: usize>(guid: Uuid, address_book: &AddressBook<N1>) {
     // Do not want to hold onto the lock
     let addrs = address_book.lock().await.clone();

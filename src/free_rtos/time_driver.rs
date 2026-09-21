@@ -55,6 +55,8 @@ impl Driver for FreeRtosTimeDriver {
 }
 
 impl FreeRtosTimeDriver {
+    /// Returns the tick count at which the next scheduled timer is due to
+    /// fire.
     pub fn next_expiration(&self) -> u64 {
         let now = self.now();
         self.queue
@@ -63,6 +65,8 @@ impl FreeRtosTimeDriver {
         // critical_section::with(|cs| self.queue.borrow(cs).borrow_mut().next_expiration(now))
     }
 
+    /// Blocks the calling FreeRTOS task until either it is notified (an
+    /// interrupt/waker fired) or the next scheduled timer expires.
     pub fn wait_for_interrupt_or_timeout(&self) {
         let now_ticks = self.now();
         let exp_ticks = self.next_expiration();

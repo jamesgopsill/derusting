@@ -17,6 +17,8 @@ pub enum Severity {
 // The `.cpp` hook exposes an extern "C" function to the
 // firmware logger so we can hook into it.
 unsafe extern "C" {
+    /// Forwards a formatted, nul-terminated log message to the firmware's
+    /// own logger at the given severity.
     pub fn derusting_log_event(severity: Severity, msg: *const c_char);
 }
 
@@ -32,6 +34,7 @@ pub fn log(severity: Severity, args: core::fmt::Arguments) {
     unsafe { derusting_log_event(severity, msg.as_ptr() as *const _) };
 }
 
+/// Logs a formatted message at `Info` severity.
 #[macro_export]
 macro_rules! log_info {
     ($($arg:tt)*) => {{
@@ -39,6 +42,7 @@ macro_rules! log_info {
     }};
 }
 
+/// Logs a formatted message at `Debug` severity.
 #[macro_export]
 macro_rules! log_debug {
     ($($arg:tt)*) => {{
@@ -46,6 +50,7 @@ macro_rules! log_debug {
     }};
 }
 
+/// Logs a formatted message at `Error` severity.
 #[macro_export]
 macro_rules! log_error {
     ($($arg:tt)*) => {{
@@ -53,6 +58,7 @@ macro_rules! log_error {
     }};
 }
 
+/// Logs a formatted message at `Warning` severity.
 #[macro_export]
 macro_rules! log_warning {
     ($($arg:tt)*) => {{
@@ -60,6 +66,7 @@ macro_rules! log_warning {
     }};
 }
 
+/// Logs a formatted message at `Critical` severity.
 #[macro_export]
 macro_rules! log_critical {
     ($($arg:tt)*) => {{

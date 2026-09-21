@@ -21,6 +21,8 @@ use crate::{
 
 const BUF_CAP: usize = 1024;
 
+/// Opens the given job's `.gcode` file and PUTs it to another machine at
+/// `addr`:`port`.
 pub async fn put_file(guid: Uuid, addr: Ipv4Addr, port: u16) -> Result<(), err_t> {
     let Ok(put) = PutRequest::new(guid, addr, port) else {
         return Err(err_t::Val);
@@ -29,6 +31,8 @@ pub async fn put_file(guid: Uuid, addr: Ipv4Addr, port: u16) -> Result<(), err_t
     put.send().await
 }
 
+/// Drives a single outbound HTTP PUT of a job file over a TCP pcb, staging
+/// file data through a fixed-size buffer as the connection allows.
 pub struct PutRequest {
     guid: Uuid,
     addr: Ipv4Addr,
@@ -62,6 +66,7 @@ impl PutRequest {
         })
     }
 
+    /// A stable pointer to `self`, registered as the pcb's callback `arg`.
     fn as_mut_ptr(&mut self) -> *mut c_void {
         self as *const _ as *mut c_void
     }
@@ -126,6 +131,8 @@ impl PutRequest {
         Ok(())
     }
 
+    /// Opens the TCP connection, sends the PUT request and file body, and
+    /// waits for the response (or a failure) to be signalled.
     pub async fn send(self: Pin<&mut Self>) -> Result<(), err_t> {
         // SAFETY: we never move out of `this` or otherwise violate the
         // pin invariant below; we only use it to obtain field references
@@ -257,6 +264,10 @@ Connection: close\r\n\r\n",
         err_t::Ok
     }
 
+    /// # Safety
+    /// Called by lwIP as a `tcp_err_fn`; see `_connected` for the `arg`
+    /// contract. Per lwIP's contract, the associated pcb has already been
+    /// freed by the stack by the time this fires.
     unsafe extern "C" fn _err(arg: *mut c_void, err: err_t) {
         if arg.is_null() {
             return;

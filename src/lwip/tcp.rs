@@ -24,10 +24,14 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
         }
     }
 
+    /// A stable pointer to `self`, registered as the listening pcb's
+    /// callback `arg`.
     fn as_mut_ptr(&'static self) -> *mut c_void {
         self as *const _ as *mut c_void
     }
 
+    /// Binds and puts a TCP pcb into the LISTEN state on `port`, ready to
+    /// accept incoming connections.
     pub async fn listen(&'static self, port: u16) -> Result<(), err_t> {
         // SAFETY: runs inside `async_lwip`, i.e. with `lock_tcpip_core`
         // held, as required by all the `tcp_*` calls below. `self` is
@@ -126,6 +130,7 @@ impl<const N: usize, const M: usize> TcpListener<N, M> {
         err_t::Mem
     }
 
+    /// Waits for the next accepted connection and runs `fcn` against it.
     pub async fn with_connection<F>(&'static self, fcn: F)
     where
         F: AsyncFnOnce(Pin<&mut TcpConnection<M>>),
@@ -166,6 +171,8 @@ impl<const N: usize, const M: usize> Drop for TcpListener<N, M> {
     }
 }
 
+/// A single accepted TCP connection, with received packets delivered
+/// through an internal channel once callbacks are attached.
 pub struct TcpConnection<const N: usize> {
     pcb: AtomicPtr<pcb>,
     channel: Channel<CriticalSectionRawMutex, Option<PacketBuffer>, N>,
@@ -182,6 +189,8 @@ impl<const N: usize> TcpConnection<N> {
         }
     }
 
+    /// Registers this connection's receive/error/sent callbacks with lwIP
+    /// and drains any data lwIP had buffered before this was pinned.
     pub async fn attach_callbacks(self: Pin<&mut Self>) -> Result<(), err_t> {
         log_info!("Attaching Callbacks");
         // SAFETY: we only use `this` to read/register fields and to obtain
@@ -210,6 +219,8 @@ impl<const N: usize> TcpConnection<N> {
         .await
     }
 
+    /// Waits for the next received packet (or `None` if the peer closed the
+    /// connection), acknowledging it to lwIP's receive window.
     pub async fn receive(self: Pin<&Self>) -> Option<PacketBuffer> {
         let pkt = self.channel.receive().await?;
         let len = pkt.total_len();
@@ -230,6 +241,7 @@ impl<const N: usize> TcpConnection<N> {
         Some(pkt)
     }
 
+    /// Writes `bytes` to the connection and flushes them immediately.
     pub async fn response(self: Pin<&mut Self>, bytes: &[u8]) -> Result<(), err_t> {
         if bytes.len() > u16::MAX as usize {
             return Err(err_t::Val);

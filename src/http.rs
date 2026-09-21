@@ -27,6 +27,7 @@ pub const INDEX_HTML: &str = formatcp!(
     HTML_STR
 );
 
+/// The HTTP methods this firmware's minimal server understands.
 pub enum Method {
     Get,
     Put,
