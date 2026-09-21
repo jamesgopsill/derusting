@@ -1,164 +1,158 @@
-use core::{cell::RefCell, ffi::c_void, net::Ipv4Addr};
-
-use embassy_sync::{
-    blocking_mutex::{Mutex, raw::ThreadModeRawMutex},
-    channel::Channel,
+use core::{
+    ffi::c_void,
+    net::Ipv4Addr,
+    sync::atomic::{AtomicPtr, Ordering},
 };
 
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
+
 use crate::{
-    log_info,
+    log_error,
     lwip::{bindings::*, packet_buffer::PacketBuffer},
 };
 
-/// A UDP control block can be interacted within
-/// or out of the thread.
-pub trait Mode {}
-
-pub struct InThread;
-impl Mode for InThread {}
-
-pub struct OutThread;
-impl Mode for OutThread {}
-
-pub struct UdpProtocolControlBlock<T: Mode> {
-    inner: *mut lwip_pcb,
-    _mode: T,
+/// A UDP socket bound to a single port, with received datagrams delivered
+/// through an internal channel.
+pub struct UdpSocket<const N: usize> {
+    pcb: AtomicPtr<pcb>,
+    channel: Channel<CriticalSectionRawMutex, (Ipv4Addr, PacketBuffer), N>,
 }
 
-impl TryFrom<*mut lwip_pcb> for UdpProtocolControlBlock<InThread> {
-    type Error = ();
-    fn try_from(value: *mut lwip_pcb) -> Result<Self, ()> {
-        if value.is_null() {
-            Err(())
-        } else {
-            Ok(Self {
-                inner: value,
-                _mode: InThread,
-            })
-        }
-    }
-}
+// SAFETY: the only lwIP-mutating operations on a `UdpSocket` are
+// `udp_new`/`udp_bind`/`udp_recv`/`udp_remove`/`udp_sendto`, all of which go
+// through `async_lwip`/`blocking_lwip` and therefore always run with
+// `lock_tcpip_core` held, so sharing/moving a `UdpSocket` across tasks
+// (which all run on the single Embassy executor thread here) doesn't race
+// lwIP's internal state. The `AtomicPtr` field also makes cross-task
+// access to `pcb` itself data-race-free.
+unsafe impl<const N: usize> Sync for UdpSocket<N> {}
+unsafe impl<const N: usize> Send for UdpSocket<N> {}
 
-impl TryFrom<*mut lwip_pcb> for UdpProtocolControlBlock<OutThread> {
-    type Error = ();
-    fn try_from(value: *mut lwip_pcb) -> Result<Self, ()> {
-        if value.is_null() {
-            Err(())
-        } else {
-            Ok(Self {
-                inner: value,
-                _mode: OutThread,
-            })
-        }
-    }
-}
-
-impl From<UdpProtocolControlBlock<InThread>> for UdpProtocolControlBlock<OutThread> {
-    fn from(value: UdpProtocolControlBlock<InThread>) -> Self {
-        UdpProtocolControlBlock {
-            inner: value.inner,
-            _mode: OutThread,
-        }
-    }
-}
-
-impl<T: Mode> UdpProtocolControlBlock<T> {
-    pub fn as_mut_ptr(&self) -> *mut lwip_pcb {
-        self.inner
-    }
-}
-
-impl UdpProtocolControlBlock<InThread> {
-    pub fn bind(&self, port: u16) -> Result<(), LwipError> {
-        let err = unsafe { udp_bind(self.as_mut_ptr(), &ip_addr_any, port) };
-        err.into()
-    }
-
-    pub fn recv(&self, sock: &'static UdpSocket) {
-        log_info!("setting up udp_recv()");
-        unsafe {
-            udp_recv(
-                self.as_mut_ptr(),
-                Some(on_udp_recv),
-                sock as *const _ as *mut c_void,
-            )
-        };
-    }
-
-    pub fn broadcast(&self, mut pbuf: PacketBuffer, port: u16) -> Result<(), LwipError> {
-        let addr: lwip_ipaddr = lwip_ipaddr { addr: u32::MAX };
-        let err = unsafe { udp_sendto(self.as_mut_ptr(), pbuf.as_mut_ptr(), &addr, port) };
-        err.into()
-    }
-
-    #[allow(unused)]
-    pub fn remove(self) {
-        unsafe { udp_remove(self.as_mut_ptr()) };
-    }
-}
-
-impl UdpProtocolControlBlock<OutThread> {
-    pub fn new() -> Result<Self, ()> {
-        unsafe { sys_mutex_lock(&raw mut lock_tcpip_core) };
-        let pcb = unsafe { tcp_new() };
-        unsafe { sys_mutex_unlock(&raw mut lock_tcpip_core) };
-        Self::try_from(pcb)
-    }
-
-    pub fn with_core<R>(
-        &mut self,
-        fcn: impl FnOnce(&mut UdpProtocolControlBlock<InThread>) -> R,
-    ) -> R {
-        let pcb = unsafe { &mut *(self as *mut Self as *mut UdpProtocolControlBlock<InThread>) };
-        unsafe { sys_mutex_lock(&raw mut lock_tcpip_core) };
-        let res = fcn(pcb);
-        unsafe { sys_mutex_unlock(&raw mut lock_tcpip_core) };
-        res
-    }
-}
-
-pub struct UdpSocket {
-    pub packets: Channel<ThreadModeRawMutex, (Ipv4Addr, PacketBuffer), 5>,
-    pub pcb: Mutex<ThreadModeRawMutex, RefCell<UdpProtocolControlBlock<OutThread>>>,
-}
-
-impl UdpSocket {
-    pub fn new(pcb: UdpProtocolControlBlock<OutThread>) -> Self {
+impl<const N: usize> UdpSocket<N> {
+    /// Create a new instance of UDP socket.
+    pub fn new() -> Self {
         Self {
-            packets: Channel::new(),
-            pcb: Mutex::new(RefCell::new(pcb)),
+            pcb: AtomicPtr::new(core::ptr::null_mut()),
+            channel: Channel::new(),
         }
     }
 
-    pub fn broadcast(&self, pbuf: PacketBuffer, port: u16) -> Result<(), LwipError> {
-        // log_info!("Socket broadcasting");
-        self.pcb.lock(|rc| {
-            let mut pcb = rc.borrow_mut();
-            pcb.with_core(|pcb| pcb.broadcast(pbuf, port))
+    /// An internal function to create a pointer to `self`
+    /// that is used to set up the LWIP callbacks. `self` needs
+    /// to be `static` (i.e., pinned in memory) to prevent
+    /// undefined behaviour as the lwip callbacks will expect it to
+    /// be pinned in memory which static provides.
+    fn as_mut_ptr(&self) -> *mut c_void {
+        self as *const _ as *mut c_void
+    }
+
+    /// Binds a `UDPSocket<N>` to a port to receive data on.
+    pub async fn bind(&'static self, port: u16) -> Result<(), err_t> {
+        // SAFETY: runs inside `async_lwip` (core lock held), as required by
+        // `udp_new`/`udp_bind`/`udp_recv`/`udp_remove`. `self` is
+        // `&'static`, so `self.as_mut_ptr()` registered as the pcb's `recv`
+        // arg stays valid for as long as the pcb (and therefore this
+        // `UdpSocket`) exists.
+        super::async_lwip(|| unsafe {
+            let pcb = udp_new();
+            if pcb.is_null() {
+                return Err(err_t::Mem);
+            }
+            let err = udp_bind(pcb, &ip_addr_any, port);
+            if err == err_t::Ok {
+                udp_recv(pcb, Some(Self::_recv), self.as_mut_ptr());
+                self.pcb.store(pcb, Ordering::Release);
+                Ok(())
+            } else {
+                udp_remove(pcb);
+                Err(err)
+            }
         })
+        .await
+    }
+
+    /// Broadcast a `PacketBuffer` across UDP.
+    pub async fn broadcast(&self, mut pbuf: PacketBuffer, port: u16) -> Result<(), err_t> {
+        // SAFETY: runs inside `async_lwip` (core lock held); `pcb` is
+        // checked non-null above, and `pbuf.as_mut_ptr()` is a live,
+        // exclusively-owned pbuf (owned by the `PacketBuffer` we hold by
+        // value) that `udp_sendto` consumes/references only for the
+        // duration of the call.
+        super::async_lwip(|| unsafe {
+            let pcb = self.pcb.load(Ordering::Acquire);
+            if pcb.is_null() {
+                return Err(err_t::Val);
+            }
+            let addr: ip_addr_t = ip_addr_t { addr: u32::MAX };
+            let err = udp_sendto(pcb, pbuf.as_mut_ptr(), &addr, port);
+            if err == err_t::Ok {
+                Ok(())
+            } else {
+                log_error!("{err:?}");
+                Err(err)
+            }
+        })
+        .await
+    }
+
+    /// Handle a packet the has been received in the UDP port
+    pub async fn receive(&'static self) -> (Ipv4Addr, PacketBuffer) {
+        self.channel.receive().await
+    }
+
+    /// The callback handler for receiving UDP packets.
+    ///
+    /// # Safety
+    /// Called by lwIP as a `udp_recv_fn`; `arg` must be either null or the
+    /// `*mut c_void` registered via `udp_recv` in `bind()`, i.e. a valid
+    /// `*const UdpSocket<N>`. `pbuf`, if non-null, is a pbuf this callback
+    /// takes ownership of. `addr` must be a valid, non-null pointer to an
+    /// `ip_addr_t` for the duration of the call (lwIP always supplies one
+    /// for UDP receive callbacks).
+    unsafe extern "C" fn _recv(
+        arg: *mut c_void,
+        _pcb: *mut pcb,
+        pbuf: *mut pbuf,
+        addr: *const ip_addr_t,
+        _port: u16,
+    ) {
+        if arg.is_null() {
+            return;
+        }
+
+        // SAFETY: `arg` is valid per this function's Safety contract.
+        let sock = unsafe { &*(arg as *const UdpSocket<N>) };
+
+        let Ok(pb) = PacketBuffer::try_from(pbuf) else {
+            // Should only fail if the pbuf is null
+            return;
+        };
+
+        // SAFETY: `addr` is non-null and valid per this function's Safety
+        // contract (lwIP-provided for the duration of this call).
+        // Lwip - network byte order Big-Endian. Host ARM expecting Little-Endian.
+        let addr = unsafe { Ipv4Addr::from_bits(u32::from_be((*addr).addr)) };
+
+        let _ = sock.channel.try_send((addr, pb));
+        // If we fail to send the PacketBuffer then it
+        // will free itself when dropped
     }
 }
 
-#[unsafe(no_mangle)]
-unsafe extern "C" fn on_udp_recv(
-    arg: *mut c_void,
-    _pcb: *mut lwip_pcb,
-    pbuf: *mut lwip_pbuf,
-    addr: *const lwip_ipaddr,
-    _port: u16,
-) {
-    if arg.is_null() {
-        return;
+impl<const N: usize> Drop for UdpSocket<N> {
+    fn drop(&mut self) {
+        // SAFETY: `blocking_lwip` ensures `lock_tcpip_core` is held for
+        // these udp_* calls. Note, unlike `TcpListener`/`TcpConnection`'s
+        // `Drop` impls, `pcb` is *not* checked for null here before being
+        // passed to `udp_recv`/`udp_remove` — see review notes for the
+        // scenario where this can be a null pcb.
+        let _ = super::blocking_lwip(|| unsafe {
+            let pcb = self.pcb.swap(core::ptr::null_mut(), Ordering::AcqRel);
+            if !pcb.is_null() {
+                udp_recv(pcb, None, core::ptr::null_mut());
+                udp_remove(pcb);
+            }
+            Ok(())
+        });
     }
-    let socket = unsafe { &*(arg as *const UdpSocket) };
-
-    let Ok(pb) = PacketBuffer::try_from(pbuf) else {
-        return;
-    };
-
-    // Lwip - network byte order Big-Endian. Host ARM expecting Little-Endian.
-    let addr = unsafe { Ipv4Addr::from_bits(u32::from_be((*addr).addr)) };
-
-    // NOTE. may have to handle missed sends to clean them up.
-    let _ = socket.packets.try_send((addr, pb));
 }

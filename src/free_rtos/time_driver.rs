@@ -1,6 +1,7 @@
 use core::{cell::RefCell, sync::atomic::Ordering, task::Waker};
 
-use critical_section::Mutex;
+use embassy_sync::blocking_mutex::{Mutex, raw::CriticalSectionRawMutex};
+// use critical_section::Mutex;
 use embassy_time_driver::Driver;
 use embassy_time_queue_utils::Queue;
 use portable_atomic::{AtomicU32, AtomicU64};
@@ -12,7 +13,7 @@ use crate::free_rtos::bindings::*;
 pub struct FreeRtosTimeDriver {
     pub timekeeper: AtomicU64,
     pub free_rtos_now: AtomicU32,
-    pub queue: Mutex<RefCell<Queue>>,
+    pub queue: Mutex<CriticalSectionRawMutex, RefCell<Queue>>,
 }
 
 impl Driver for FreeRtosTimeDriver {
@@ -22,6 +23,11 @@ impl Driver for FreeRtosTimeDriver {
     // own timekeeper.
     fn now(&self) -> u64 {
         critical_section::with(|_cs| {
+            // SAFETY: `xTaskGetTickCount` takes no arguments and is safe to
+            // call from any context; it is read here inside a critical
+            // section purely to keep the read-modify-write of
+            // `free_rtos_now`/`timekeeper` atomic with respect to this
+            // function, not because the call itself needs protecting.
             let free_rtos_now = unsafe { xTaskGetTickCount() };
             let previous_free_rtos_now = self.free_rtos_now.load(Ordering::SeqCst);
             let tick_diff = free_rtos_now.wrapping_sub(previous_free_rtos_now);
@@ -36,23 +42,44 @@ impl Driver for FreeRtosTimeDriver {
     /// Embassy has informed us of a new time to wake. Update our
     /// wake up time.
     fn schedule_wake(&self, at: u64, waker: &Waker) {
+        self.queue.lock(|queue| {
+            queue.borrow_mut().schedule_wake(at, waker);
+        })
+        /*
         critical_section::with(|cs| {
             let mut queue = self.queue.borrow(cs).borrow_mut();
             queue.schedule_wake(at, waker);
         })
+        */
     }
 }
 
 impl FreeRtosTimeDriver {
+    /// Returns the tick count at which the next scheduled timer is due to
+    /// fire.
     pub fn next_expiration(&self) -> u64 {
         let now = self.now();
-        critical_section::with(|cs| self.queue.borrow(cs).borrow_mut().next_expiration(now))
+        self.queue
+            .lock(|queue| queue.borrow_mut().next_expiration(now))
+
+        // critical_section::with(|cs| self.queue.borrow(cs).borrow_mut().next_expiration(now))
     }
 
+    /// Blocks the calling FreeRTOS task until either it is notified (an
+    /// interrupt/waker fired) or the next scheduled timer expires.
     pub fn wait_for_interrupt_or_timeout(&self) {
         let now_ticks = self.now();
         let exp_ticks = self.next_expiration();
         let diff_ticks = exp_ticks.saturating_sub(now_ticks);
+        let diff_ticks = diff_ticks.min(u32::MAX as u64);
+        // SAFETY: `ulTaskGenericNotifyTake` takes only plain integer
+        // arguments and must be called from the task that will be
+        // notified, which is this executor's own FreeRTOS task (see
+        // `FreeRtosTaskExecutor::run`, the only caller of this function).
+        // Note: `diff_ticks` (a `u64`) is narrowed to `u32` here; when no
+        // timer is scheduled `exp_ticks` is very large (queue "no
+        // expiration" sentinel) and this cast can wrap, which may not wait
+        // as long as intended.
         unsafe { ulTaskGenericNotifyTake(0, 1, diff_ticks as u32) };
         let _ = self.next_expiration();
     }

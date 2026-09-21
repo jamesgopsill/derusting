@@ -4,7 +4,7 @@ use embassy_executor::{Spawner, raw};
 
 use crate::{
     DRIVER,
-    free_rtos::bindings::{RtosTask, xTaskGenericNotify, xTaskGenericNotifyFromISR},
+    free_rtos::bindings::{BaseType_t, xTaskGenericNotify, xTaskGenericNotifyFromISR},
     log_info,
 };
 
@@ -17,7 +17,7 @@ pub struct FreeRtosTaskExecutor {
 
 impl FreeRtosTaskExecutor {
     /// Create a new instance of the Executor
-    pub fn new(task: *mut RtosTask) -> Self {
+    pub fn new(task: *mut BaseType_t) -> Self {
         Self {
             inner: raw::Executor::new(task as _),
             not_send: PhantomData,
@@ -31,6 +31,11 @@ impl FreeRtosTaskExecutor {
         init(self.inner.spawner());
 
         loop {
+            // SAFETY: `raw::Executor::poll` requires that it only be
+            // called from the thread/task the executor is pinned to (the
+            // FreeRTOS task passed to `FreeRtosTaskExecutor::new`) and not
+            // be re-entered concurrently; this loop is the sole caller and
+            // runs on that task without concurrent invocation.
             unsafe { self.inner.poll() };
             DRIVER.wait_for_interrupt_or_timeout();
         }
@@ -46,10 +51,14 @@ pub fn __pender(context: *mut c_void) {
     if context.is_null() {
         return;
     }
-    let task_handle = context as *mut RtosTask;
+    let task_handle = context as *mut BaseType_t;
 
     // Determine if we're in an interrupt or non-interrupt state.
     let ipsr: u32;
+    // SAFETY: `mrs` reading the IPSR register is a pure register read with
+    // no memory or stack effects and no side effects on CPU flags, matching
+    // the `nomem, nostack, preserves_flags` options asserted here; it is
+    // valid on any Cortex-M core regardless of privilege/interrupt state.
     unsafe {
         core::arch::asm!(
             "mrs {0}, ipsr",
@@ -59,6 +68,11 @@ pub fn __pender(context: *mut c_void) {
     }
     if ipsr != 0 {
         let mut higher_priority_task_woken = 0;
+        // SAFETY: we are in ISR context (`ipsr != 0`), which is the
+        // required calling context for `xTaskGenericNotifyFromISR`;
+        // `task_handle` came from `__pender`'s caller as the executor's own
+        // task handle, and `&mut higher_priority_task_woken` is a valid,
+        // writable local we own for the duration of the call.
         unsafe {
             xTaskGenericNotifyFromISR(
                 task_handle,
@@ -76,6 +90,8 @@ pub fn __pender(context: *mut c_void) {
             }
         }
     } else {
+        // SAFETY: we are in thread (non-ISR) context here, which is the
+        // required calling context for `xTaskGenericNotify`.
         unsafe {
             xTaskGenericNotify(task_handle, 0, 0, 2, ptr::null_mut());
         }

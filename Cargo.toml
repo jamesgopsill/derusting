@@ -13,6 +13,9 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+[lints.clippy]
+# large_stack_frames = "warn"
+
 [dependencies]
 const_format = "0.2"
 cortex-m = {
@@ -24,12 +27,13 @@ embassy-executor = {
   version = "0.10",
   features = ["embassy-time-driver"]
 }
+embassy-futures = "0.1"
 embassy-sync = "0.8"
 embassy-time-queue-utils = "0.3"
 embassy-time-driver = "0.2"
 embassy-time = {
   version = "0.5",
-  features = ["tick-hz-1_000", "generic-queue-8"]
+  features = ["tick-hz-1_000", "generic-queue-32"]
 }
 embedded-io = "0.7"
 getrandom = {
@@ -57,7 +61,6 @@ serde = {
   default-features = false,
   features = ["derive"]
 }
-serde-big-array = "0.5"
 thiserror = {
   version = "2",
   default-features = false
