@@ -254,14 +254,19 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
         guard.is_empty()
     };
 
+    // TODO(failover): if Ledger becomes wrapped as
+    // `LedgerState { ledger, updated_at }` (src/kinds.rs), the field
+    // accesses below need adjusting accordingly, but this site should NOT
+    // bump `updated_at` - a job upload isn't evidence the owner is alive,
+    // same reasoning as the NewJob branch in udp.rs's udp_receiver.
     let is_owner = {
         let mut guard = ledger.lock().await;
-        if let Some(ledge) = guard.as_mut()
+        if let Some(state) = guard.as_mut()
             && let Some(addr) = my_ipaddr()
-            && addr == ledge.owner
+            && addr == state.ledger.owner
         {
             log_info!("I own the ledger. Adding the file");
-            let _ = ledge.jobs.insert(guid);
+            let _ = state.ledger.jobs.insert(guid);
             true
         } else {
             false

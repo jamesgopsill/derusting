@@ -1,12 +1,12 @@
 use core::net::Ipv4Addr;
 
-use embassy_time::{Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
 use heapless::HistoryBuf;
 use heapless::index_set::FnvIndexSet;
 use uuid::Uuid;
 
 use crate::fs::{self, ReadBytes, make_path};
-use crate::kinds::{AddressBook, JobLedger};
+use crate::kinds::{AddressBook, JobLedger, LedgerState};
 use crate::lwip::my_ipaddr;
 use crate::lwip::udp::UdpSocket;
 use crate::tasks::messages::{Ledger, Message, Payload};
@@ -19,7 +19,7 @@ use crate::{log_error, log_info};
 pub async fn heartbeat(udp: &'static UdpSocket<UDP_CHANNEL_SIZE>) {
     loop {
         if let Some(addr) = my_ipaddr() {
-            // log_info!("[{:?}] heartbeat()", addr);
+            log_info!("[{:?}] heartbeat()", addr);
         } else {
             log_info!("[Unknown] heartbeat()");
         }
@@ -74,7 +74,7 @@ pub async fn udp_receiver(
             {
                 let mut guard = ledger.lock().await;
                 if let Some(ledger) = guard.as_mut() {
-                    let _ = ledger.jobs.insert(data.guid);
+                    let _ = ledger.ledger.jobs.insert(data.guid);
                 }
             }
             continue;
@@ -85,7 +85,7 @@ pub async fn udp_receiver(
         if let Payload::Ledger(sent_ledger) = msg.payload {
             {
                 let mut l = ledger.lock().await;
-                *l = Some(sent_ledger);
+                *l = Some(LedgerState::new(sent_ledger));
             }
             continue;
         }
@@ -134,25 +134,43 @@ pub async fn manage_ledger(
                 owner: my_addr,
                 jobs: FnvIndexSet::new(),
             };
-            *ledger_guard = Some(ledger.clone());
-            Message::send_ledger(ledger, udp).await;
+            let state = LedgerState::new(ledger);
+            *ledger_guard = Some(state);
+            if let Some(ledger_state) = ledger_guard.as_mut() {
+                Message::send_ledger(ledger_state.ledger.clone(), udp).await;
+            };
             continue;
         }
 
-        let Some(ledger) = ledger_guard.as_mut() else {
+        let Some(ledger_state) = ledger_guard.as_mut() else {
             log_info!("I do not have the ledger");
             continue;
         };
 
-        // Am I the owner?
-        let is_owner = my_addr == ledger.owner;
+        // if the ledger has not updated in 45 seconds and the owner is not
+        // in the address book any more then we need to try and renew the
+        // ledger.
+        if ledger_state.received.elapsed() > Duration::from_secs(45)
+            && !book_guard.contains_key(&ledger_state.ledger.owner)
+        {
+            if let Some(min_addr) = book_guard.keys().min() {
+                // I am the lowest ip address on the network
+                // so I will take over.
+                if *min_addr == my_addr {
+                    ledger_state.ledger.owner = my_addr;
+                }
+            } else {
+                // No one in the address book so take ownership.
+                ledger_state.ledger.owner = my_addr;
+            };
+        }
 
         // I have the ledger - let's see if I can manufacture something.
-        if is_owner && marlin::is_ready() && marlin::is_idle() {
+        if ledger_state.is_owner() && marlin::is_ready() && marlin::is_idle() {
             log_info!("Available for Jobs");
 
             // Find the first printable job
-            let printable_job = ledger.jobs.iter().find_map(|&guid| {
+            let printable_job = ledger_state.ledger.jobs.iter().find_map(|&guid| {
                 let path = make_path(&guid, false);
                 if fs::open(&path, ReadBytes).is_ok() {
                     Some((guid, path))
@@ -165,7 +183,7 @@ pub async fn manage_ledger(
                 match marlin::print(&path, true) {
                     Ok(_) => {
                         marlin::set_offline();
-                        ledger.jobs.remove(&guid);
+                        ledger_state.ledger.jobs.remove(&guid);
                     }
                     Err(e) => {
                         log_error!("Print Error: {e}");
@@ -175,14 +193,13 @@ pub async fn manage_ledger(
         }
 
         // If I am the owner then I should try and pass the ledger on.
-        if is_owner {
+        if ledger_state.is_owner() {
             if book_guard.is_empty() {
                 log_info!("It's only me - keeping ledger - and telling everyone.");
-                Message::send_ledger(ledger.clone(), udp).await;
+                Message::send_ledger(ledger_state.ledger.clone(), udp).await;
                 continue;
             }
 
-            // Pass on the ledger to the next machine
             let mut next_highest = u8::MAX;
             let mut next_addr: Ipv4Addr = Ipv4Addr::new(255, 255, 255, 255);
             for addr in book_guard.keys() {
@@ -195,14 +212,14 @@ pub async fn manage_ledger(
             }
             // We know there is one from our previous checks
             if next_highest > 0 && next_highest < u8::MAX {
-                ledger.owner = next_addr;
+                ledger_state.ledger.owner = next_addr;
             } else {
                 // We know there is at least one in the address book.
                 let min_addr = book_guard.keys().min().unwrap();
-                ledger.owner = *min_addr;
+                ledger_state.ledger.owner = *min_addr;
             }
 
-            Message::send_ledger(ledger.clone(), udp).await;
+            Message::send_ledger(ledger_state.ledger.clone(), udp).await;
         }
     }
 }
