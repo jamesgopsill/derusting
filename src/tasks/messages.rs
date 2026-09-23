@@ -34,20 +34,23 @@ pub struct Ledger {
 /// The envelope every UDP message is wrapped in, carrying an idempotency
 /// key used to drop duplicate deliveries.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Message {
+pub struct Message<'a> {
     pub idempotency: Uuid,
-    pub payload: Payload,
+    #[serde(borrow)]
+    pub payload: Payload<'a>,
 }
 
 /// The kinds of message broadcast over UDP between machines.
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Payload {
+pub enum Payload<'a> {
     Heartbeat(Heartbeat),
     NewJob(NewJob),
     Ledger(Ledger),
+    #[serde(borrow)]
+    Log(&'a str),
 }
 
-impl Message {
+impl<'a> Message<'a> {
     /// Broadcasts a `Heartbeat` message once.
     pub async fn send_heartbeat<const N: usize>(udp: &UdpSocket<N>) {
         let msg = Self {
@@ -75,6 +78,14 @@ impl Message {
             payload: Payload::Ledger(ledger),
         };
         Self::send(udp, msg, 5).await;
+    }
+
+    pub async fn send_log<const N: usize>(log: &'a str, udp: &UdpSocket<N>) {
+        let msg = Self {
+            idempotency: generate_uuid_v7(),
+            payload: Payload::Log(log),
+        };
+        Self::send(udp, msg, 2).await;
     }
 
     /// Serialises and broadcasts `msg` over UDP, `repeats` times with a

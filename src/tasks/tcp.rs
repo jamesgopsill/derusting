@@ -1,5 +1,6 @@
 use core::pin::Pin;
 
+use alloc::format;
 use embedded_io::Write as _;
 use uuid::Uuid;
 
@@ -45,7 +46,9 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
     address_book: &AddressBook<N3>,
     ledger: &JobLedger,
 ) {
-    log_info!("Handling TCP Connection");
+    let msg = "Handling TCP Connection";
+    log_info!("{msg}");
+    Message::send_log(msg, udp).await;
     let Some(pbuf) = conn.as_ref().receive().await else {
         log_error!("Handle Closed");
         return;
@@ -77,7 +80,9 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
             let _ = conn.response(INDEX_HTML.as_bytes()).await;
         }
         Method::Put => {
-            log_info!("/ PUT request received");
+            let msg = "/ PUT request received";
+            log_info!("{msg}");
+            Message::send_log(msg, udp).await;
 
             let info = check_put_header(headers);
             if !info.is_gcode
@@ -89,7 +94,10 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
             }
 
             let guid = match info.guid {
-                Some(guid) => guid,
+                Some(guid) => {
+                    Message::send_log("Receiving file from machine", udp).await;
+                    guid
+                }
                 None => generate_uuid_v7(),
             };
             let path = fs::make_path(&guid, true);
@@ -149,7 +157,7 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
             if info.guid.is_none() {
                 // New file to the system so we alert everyone else
                 append_to_ledger(guid, address_book, ledger, udp).await;
-                distribute_file(guid, address_book).await;
+                distribute_file(guid, address_book, udp).await;
             }
         }
     }
@@ -258,11 +266,6 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
         guard.is_empty()
     };
 
-    // TODO(failover): if Ledger becomes wrapped as
-    // `LedgerState { ledger, updated_at }` (src/kinds.rs), the field
-    // accesses below need adjusting accordingly, but this site should NOT
-    // bump `updated_at` - a job upload isn't evidence the owner is alive,
-    // same reasoning as the NewJob branch in udp.rs's udp_receiver.
     let is_owner = {
         let mut guard = ledger.lock().await;
         if let Some(state) = guard.as_mut()
@@ -283,13 +286,19 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
 }
 
 /// Sends the given job's file to every other known machine on the network.
-async fn distribute_file<const N1: usize>(guid: Uuid, address_book: &AddressBook<N1>) {
+async fn distribute_file<const N1: usize, const N2: usize>(
+    guid: Uuid,
+    address_book: &AddressBook<N1>,
+    udp: &UdpSocket<N2>,
+) {
     // Do not want to hold onto the lock
     let addrs = address_book.lock().await.clone();
     for (addr, _v) in addrs {
-        log_info!("Sending file to {addr}");
+        let msg = format!("PUT {guid} to {addr}:{TCP_PORT}");
+        Message::send_log(&msg, udp).await;
         if let Err(err) = put_file(guid, addr, TCP_PORT).await {
-            log_error!("Put Error: {err}");
+            let err = format!("Put Error: {err}");
+            Message::send_log(&err, udp).await;
         };
     }
 }

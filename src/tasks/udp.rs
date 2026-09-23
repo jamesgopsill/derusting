@@ -1,5 +1,6 @@
 use core::net::Ipv4Addr;
 
+use alloc::format;
 use embassy_time::{Duration, Instant, Timer};
 use heapless::HistoryBuf;
 use heapless::index_set::FnvIndexSet;
@@ -184,6 +185,8 @@ pub async fn manage_ledger(
                     Ok(_) => {
                         marlin::set_offline();
                         ledger_state.ledger.jobs.remove(&guid);
+                        let msg = format!("Job Accepted: {guid}");
+                        Message::send_log(&msg, udp).await;
                     }
                     Err(e) => {
                         log_error!("Print Error: {e}");

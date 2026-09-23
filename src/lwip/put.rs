@@ -158,7 +158,7 @@ impl PutRequest {
             tcp_sent(pcb, Some(Self::_sent));
             tcp_recv(pcb, Some(Self::_recv));
             tcp_err(pcb, Some(Self::_err));
-            let addr = this.addr.to_bits();
+            let addr = this.addr.to_bits().to_be();
             let addr = ip_addr_t { addr };
             let err = tcp_connect(pcb, &addr, this.port, Self::_connected);
             if err == err_t::Ok {
@@ -194,7 +194,7 @@ impl PutRequest {
         let headers = format!(
             "PUT / HTTP/1.1\r\n\
 guid: {}\r\n\
-Content-Type: text/x.gcode\r\n
+Content-Type: text/x.gcode\r\n\
 Content-Length: {}\r\n\
 Connection: close\r\n\r\n",
             this.guid, this.fsize
@@ -235,7 +235,7 @@ Connection: close\r\n\r\n",
         err_t::Ok
     }
 
-    /// # Safety
+    /// SAFETY:
     /// Called by lwIP as a `tcp_recv_fn`; see `_connected` for the `arg`
     /// contract. `pbuf`, if non-null, is a pbuf this callback takes
     /// ownership of (via `PacketBuffer::try_from`).
