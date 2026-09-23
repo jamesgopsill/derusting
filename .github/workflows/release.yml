@@ -53,7 +53,7 @@ jobs:
           target: thumbv7em-none-eabihf
 
       - name: Build Derusting
-        run: bash build_firmware.sh --bootloader yes
+        run: bash scripts/build_firmware.sh --bootloader yes
 
       - name: Increment Version Tag
         env:
