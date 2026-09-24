@@ -141,6 +141,7 @@ pub async fn handle_conn<const N1: usize>(
             // Rename from partial to full.
             fs::rname(&path, &new_path);
             let _ = conn.response(OK.as_bytes()).await;
+            state.log_to_udp("File Received").await;
 
             if info.guid.is_none() {
                 // New file to the system so we alert everyone else

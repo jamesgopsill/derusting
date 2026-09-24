@@ -98,6 +98,8 @@ where
     // closure while holding it, and always release it afterwards (no early
     // return between lock/unlock), matching lwIP's `LOCK_TCPIP_CORE`/
     // `UNLOCK_TCPIP_CORE` contract for calling its APIs from this thread.
+    // TODO: Check whether it detects if anyone else is holding the lock.
+    // Had a random `lwip_core` error and this is an issue during Drops.
     unsafe {
         if derusting_holds_tcpip_core_lock() {
             closure()
