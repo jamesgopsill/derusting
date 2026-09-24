@@ -3,16 +3,20 @@
 use core::cell::RefCell;
 
 use embassy_executor::Spawner;
-use embassy_sync::{blocking_mutex::Mutex, mutex::Mutex as AsyncMutex};
+use embassy_sync::{
+    blocking_mutex::{Mutex, raw::ThreadModeRawMutex},
+    channel::Channel,
+    mutex::Mutex as AsyncMutex,
+};
 use embassy_time::Timer;
 use embassy_time_queue_utils::Queue;
 use heapless::LinearMap;
 use portable_atomic::{AtomicU32, AtomicU64};
 use static_cell::StaticCell;
+use uuid::Uuid;
 
 use crate::{
     free_rtos::{
-        alloc::FreeRtosAllocator,
         bindings::{
             pvParameters, uxTaskGetStackHighWaterMark, vTaskDelay, xPortGetFreeHeapSize,
             xTaskGetCurrentTaskHandle,
@@ -21,16 +25,16 @@ use crate::{
         task::Task,
         time_driver::FreeRtosTimeDriver,
     },
+    fs::clean_usb,
     kinds::{AddressBook, JobLedger},
     lwip::{my_ipaddr, tcp::TcpListener, udp::UdpSocket},
     marlin::{is_ready, set_offline},
     tasks::{
-        tcp::tcp_worker,
+        messages::Message,
+        tcp::{distribute_file, tcp_worker},
         udp::{address_book_lifetime_check, heartbeat, manage_ledger, udp_receiver},
     },
 };
-
-extern crate alloc;
 
 mod free_rtos;
 mod fs;
@@ -45,11 +49,6 @@ mod tasks;
 pub const UDP_PORT: u16 = 9090;
 pub const TCP_PORT: u16 = 8080;
 
-/// Define our global allocator for those times we want to make use
-/// of `alloc` and the heap.
-#[global_allocator]
-static ALLOCATOR: FreeRtosAllocator = FreeRtosAllocator;
-
 // Instantiate our Embassy Time Driver the interacts with FreeRTOS.
 // Designed for Embassy executors running inside a FreeRTOS task.
 embassy_time_driver::time_driver_impl!(static DRIVER: FreeRtosTimeDriver = FreeRtosTimeDriver {
@@ -62,7 +61,10 @@ embassy_time_driver::time_driver_impl!(static DRIVER: FreeRtosTimeDriver = FreeR
 static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
 
 /// Reserving space for our task at compile time.
-const STACK_BYTES: usize = 1024 * 10; // / 4 for u32 stack words
+/// We only need a small stack to hold the executor. The
+/// embassy task macro provides the stack memory required
+/// for each embassy task.
+const STACK_BYTES: usize = 1024 * 4; // / 4 for u32 stack words
 static mut RTOS_STACK: [u8; STACK_BYTES] = [0u8; STACK_BYTES];
 static mut RTOS_TCB: [u8; 128] = [0u8; 128];
 
@@ -118,6 +120,8 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut pvParameters) -> ! {
         Err(e) => log_error!("stat error: {e}"),
     }
 
+    clean_usb();
+
     log_info!("Is Ready: {}", is_ready());
     set_offline();
 
@@ -134,33 +138,56 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut pvParameters) -> ! {
 
 pub const ADDRESS_BOOK_ENTRIES: usize = 32;
 pub const UDP_CHANNEL_SIZE: usize = 12;
-pub const MAX_TCP_CONNECTIONS: usize = 2;
+pub const MAX_TCP_CONNECTIONS: usize = 1;
 pub const MAX_TCP_CONNECTION_CHANNEL_SIZE: usize = 12;
 
-static ADDRESS_BOOK: AddressBook<ADDRESS_BOOK_ENTRIES> = AsyncMutex::new(LinearMap::new());
-static JOB_LEDGER: JobLedger = AsyncMutex::new(None);
-static UDP: StaticCell<UdpSocket<UDP_CHANNEL_SIZE>> = StaticCell::new();
-static TCP: StaticCell<TcpListener<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>> =
-    StaticCell::new();
+pub struct DerustingState {
+    addresses: AddressBook<ADDRESS_BOOK_ENTRIES>,
+    jobs: JobLedger,
+    udp: UdpSocket<UDP_CHANNEL_SIZE>,
+    tcp: TcpListener<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>,
+    files_to_distribute: Channel<ThreadModeRawMutex, Uuid, 4>,
+}
+
+impl DerustingState {
+    fn new() -> Self {
+        let addresses = AsyncMutex::new(LinearMap::new());
+        let jobs = AsyncMutex::new(None);
+        let udp = UdpSocket::new();
+        let tcp = TcpListener::new();
+        let channel = Channel::new();
+        Self {
+            addresses,
+            jobs,
+            udp,
+            tcp,
+            files_to_distribute: channel,
+        }
+    }
+
+    async fn log_to_udp(&self, msg: &str) {
+        Message::send_log(msg, &self.udp).await;
+    }
+}
+
+static DERUSTING_STATE: StaticCell<DerustingState> = StaticCell::new();
 
 /// The main Embassy task: brings up UDP/TCP, waits for an IP address, then
 /// spawns the heartbeat, address-book, ledger and TCP worker tasks.
 #[embassy_executor::task(pool_size = 1)]
 async fn embassy_main(spawner: Spawner) {
     log_stack_and_heap_size();
-    let address_book = &ADDRESS_BOOK;
-    let ledger = &JOB_LEDGER;
 
-    let udp = UDP.init_with(UdpSocket::<UDP_CHANNEL_SIZE>::new);
-    if udp.bind(UDP_PORT).await.is_err() {
+    let state = DerustingState::new();
+    let state = DERUSTING_STATE.init(state);
+
+    if state.udp.bind(UDP_PORT).await.is_err() {
         log_critical!("UDP failed");
         return;
     };
     log_info!("UDP up on {UDP_PORT}");
 
-    let tcp =
-        TCP.init_with(TcpListener::<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>::new);
-    if let Err(err) = tcp.listen(TCP_PORT).await {
+    if let Err(err) = state.tcp.listen(TCP_PORT).await {
         log_critical!("TCP Failed: {err:?}");
         return;
     };
@@ -174,27 +201,31 @@ async fn embassy_main(spawner: Spawner) {
         Timer::after_secs(1).await;
     }
 
-    match heartbeat(udp) {
+    match heartbeat(state) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     }
-    match address_book_lifetime_check(address_book) {
+    match address_book_lifetime_check(state) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     }
-    match manage_ledger(udp, address_book, ledger) {
+    match manage_ledger(state) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     }
-    match udp_receiver(udp, address_book, ledger) {
+    match udp_receiver(state) {
         Ok(t) => spawner.spawn(t),
         Err(e) => log_error!("Spawn Error: {e}"),
     }
-    for _i in 0..1 {
-        match tcp_worker(tcp, udp, address_book, ledger) {
+    for _i in 0..MAX_TCP_CONNECTIONS {
+        match tcp_worker(state) {
             Ok(t) => spawner.spawn(t),
             Err(e) => log_error!("Spawn Error: {e}"),
         }
+    }
+    match distribute_file(state) {
+        Ok(t) => spawner.spawn(t),
+        Err(e) => log_error!("Spawn Error: {e}"),
     }
 }
 

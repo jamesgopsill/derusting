@@ -1,8 +1,6 @@
 #![allow(unused, non_camel_case_types)]
 use core::{ffi::c_void, ptr};
 
-use alloc::vec::Vec;
-
 use crate::{log_error, log_info};
 
 /// Opaque handle to an lwIP protocol control block (TCP or UDP).

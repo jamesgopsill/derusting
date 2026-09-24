@@ -53,7 +53,6 @@ portable-atomic = "1"
 postcard = {
   version = "1",
   default-features = false,
-  features = ["alloc"]
 }
 static_cell = "2"
 serde = {

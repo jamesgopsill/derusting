@@ -1,6 +1,6 @@
 use core::ffi::c_char;
 
-use alloc::format;
+use heapless::format;
 
 /// The severity of the log event.
 #[repr(i32)]
@@ -24,14 +24,16 @@ unsafe extern "C" {
 
 /// Our internal log function
 pub fn log(severity: Severity, args: core::fmt::Arguments) {
-    let mut msg = format!("{}", args);
-    msg.push('\0');
-    // SAFETY: `derusting_log_event` (see libderusting.cpp) forwards `msg`
-    // to a "%s"-style logger, so it must point to a valid, nul-terminated
-    // byte string for the duration of this call. We just appended '\0' to
-    // `msg` above and the pointer stays valid until `msg` is dropped after
-    // this call returns.
-    unsafe { derusting_log_event(severity, msg.as_ptr() as *const _) };
+    if let Ok(msg) = format!(64; "{}\0", args) {
+        // SAFETY: `derusting_log_event` (see libderusting.cpp) forwards `msg`
+        // to a "%s"-style logger, so it must point to a valid, nul-terminated
+        // byte string for the duration of this call. We just appended '\0' to
+        // `msg` above and the pointer stays valid until `msg` is dropped after
+        // this call returns.
+        unsafe { derusting_log_event(severity, msg.as_ptr() as *const _) };
+    } else {
+        unsafe { derusting_log_event(severity, c"Message too long...".as_ptr() as *const _) };
+    }
 }
 
 /// Logs a formatted message at `Info` severity.

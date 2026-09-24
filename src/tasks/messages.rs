@@ -67,7 +67,7 @@ impl<'a> Message<'a> {
             idempotency: generate_uuid_v7(),
             payload: Payload::NewJob(NewJob { guid }),
         };
-        Self::send(udp, msg, 5).await;
+        Self::send(udp, msg, 3).await;
     }
 
     /// Broadcasts the current `Ledger`, repeated a few times to tolerate
@@ -77,7 +77,7 @@ impl<'a> Message<'a> {
             idempotency: generate_uuid_v7(),
             payload: Payload::Ledger(ledger),
         };
-        Self::send(udp, msg, 5).await;
+        Self::send(udp, msg, 3).await;
     }
 
     pub async fn send_log<const N: usize>(log: &'a str, udp: &UdpSocket<N>) {
@@ -98,7 +98,7 @@ impl<'a> Message<'a> {
                 };
                 let _ = udp.broadcast(pbuf, UDP_PORT).await;
             }
-            Timer::after_millis(200).await
+            Timer::after_millis(100).await
         }
     }
 }

@@ -6,10 +6,10 @@ use core::{
     sync::atomic::Ordering,
 };
 
-use alloc::format;
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use embedded_io::Read;
 use heapless::Vec;
+use heapless::format;
 use portable_atomic::AtomicPtr;
 use uuid::Uuid;
 
@@ -191,14 +191,13 @@ impl PutRequest {
             this.signal.signal(err);
             return err;
         }
-        let headers = format!(
-            "PUT / HTTP/1.1\r\n\
-guid: {}\r\n\
-Content-Type: text/x.gcode\r\n\
-Content-Length: {}\r\n\
-Connection: close\r\n\r\n",
+        let Ok(headers) = format!(256; "PUT / HTTP/1.1\r\nguid: {}\r\nContent-Type: text/x.gcode\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             this.guid, this.fsize
-        );
+        ) else {
+            log_error!("PUT header did not fit");
+            this.signal.signal(err_t::Mem);
+            return err_t::Mem;
+        };
         let _ = this.buf.extend_from_slice(headers.as_bytes());
 
         // SAFETY: `pcb` is the live pcb lwIP just handed us for this

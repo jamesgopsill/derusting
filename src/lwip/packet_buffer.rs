@@ -1,6 +1,6 @@
 use core::marker::PhantomData;
 
-use alloc::slice;
+use core::slice;
 use postcard::ser_flavors::Size;
 use serde::Serialize;
 

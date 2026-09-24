@@ -1,54 +1,42 @@
 use core::pin::Pin;
 
-use alloc::format;
 use embedded_io::Write as _;
+use heapless::format;
 use uuid::Uuid;
 
 use crate::{
-    ADDRESS_BOOK_ENTRIES, MAX_TCP_CONNECTION_CHANNEL_SIZE, MAX_TCP_CONNECTIONS, TCP_PORT,
-    UDP_CHANNEL_SIZE,
+    DerustingState, MAX_TCP_CONNECTIONS, TCP_PORT,
     fs::{self, WriteBytes},
     http::{BAD_REQUEST, INDEX_HTML, INTERNAL_SERVER_ERROR, METHOD_NOT_ALLOWED, Method, OK},
-    kinds::{AddressBook, JobLedger},
     log_error, log_info,
-    lwip::{
-        my_ipaddr,
-        put::put_file,
-        tcp::{TcpConnection, TcpListener},
-        udp::UdpSocket,
-    },
+    lwip::{my_ipaddr, put::put_file, tcp::TcpConnection},
     tasks::{messages::Message, rng::generate_uuid_v7},
 };
 
 /// This task receives new tcp handlers and spawns
 /// tasks to manage each one.
-#[embassy_executor::task(pool_size = 2)]
-pub async fn tcp_worker(
-    tcp: &'static TcpListener<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>,
-    udp: &'static UdpSocket<UDP_CHANNEL_SIZE>,
-    address_book: &'static AddressBook<ADDRESS_BOOK_ENTRIES>,
-    ledger: &'static JobLedger,
-) {
+#[embassy_executor::task(pool_size = MAX_TCP_CONNECTIONS)]
+pub async fn tcp_worker(state: &'static DerustingState) {
     loop {
-        tcp.with_connection(async |conn| {
-            log_info!("New Connection Received");
-            handle_conn(conn, udp, address_book, ledger).await
-        })
-        .await
+        state
+            .tcp
+            .with_connection(async |conn| {
+                log_info!("New Connection Received");
+                handle_conn(state, conn).await
+            })
+            .await
     }
 }
 
 /// A task that handles TCP requests for the printer. There is only `GET /` and `PUT /` to
 /// retrieve the submission and put files onto the network for processing.
-pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
+pub async fn handle_conn<const N1: usize>(
+    state: &'static DerustingState,
     conn: Pin<&mut TcpConnection<N1>>,
-    udp: &UdpSocket<N2>,
-    address_book: &AddressBook<N3>,
-    ledger: &JobLedger,
 ) {
     let msg = "Handling TCP Connection";
     log_info!("{msg}");
-    Message::send_log(msg, udp).await;
+    Message::send_log(msg, &state.udp).await;
     let Some(pbuf) = conn.as_ref().receive().await else {
         log_error!("Handle Closed");
         return;
@@ -82,7 +70,7 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
         Method::Put => {
             let msg = "/ PUT request received";
             log_info!("{msg}");
-            Message::send_log(msg, udp).await;
+            Message::send_log(msg, &state.udp).await;
 
             let info = check_put_header(headers);
             if !info.is_gcode
@@ -95,7 +83,7 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
 
             let guid = match info.guid {
                 Some(guid) => {
-                    Message::send_log("Receiving file from machine", udp).await;
+                    state.log_to_udp("Receiving file from machine").await;
                     guid
                 }
                 None => generate_uuid_v7(),
@@ -156,8 +144,11 @@ pub async fn handle_conn<const N1: usize, const N2: usize, const N3: usize>(
 
             if info.guid.is_none() {
                 // New file to the system so we alert everyone else
-                append_to_ledger(guid, address_book, ledger, udp).await;
-                distribute_file(guid, address_book, udp).await;
+                append_to_ledger(guid, state).await;
+                // TODO: could log the error
+                if state.files_to_distribute.try_send(guid).is_err() {
+                    state.log_to_udp("Error sending on channel").await;
+                };
             }
         }
     }
@@ -251,29 +242,24 @@ fn check_put_header(headers: &str) -> PutInfo {
 
 /// If we own the ledger, adds the new job to it; otherwise alerts the
 /// network to the new job, unless we're the only machine around.
-async fn append_to_ledger<const N1: usize, const N2: usize>(
-    guid: Uuid,
-    address_book: &AddressBook<N1>,
-    ledger: &JobLedger,
-    udp: &UdpSocket<N2>,
-) {
+async fn append_to_ledger(guid: Uuid, state: &'static DerustingState) {
     // Append to the ledger or send our new job request...
     // Communicate the new job across the network
     // Send the msg N times just in case of drop outs.
     // Can I zero copy and re-use a pbuf?
     let address_book_is_empty = {
-        let guard = address_book.lock().await;
+        let guard = state.addresses.lock().await;
         guard.is_empty()
     };
 
     let is_owner = {
-        let mut guard = ledger.lock().await;
-        if let Some(state) = guard.as_mut()
+        let mut guard = state.jobs.lock().await;
+        if let Some(job_state) = guard.as_mut()
             && let Some(addr) = my_ipaddr()
-            && addr == state.ledger.owner
+            && addr == job_state.ledger.owner
         {
             log_info!("I own the ledger. Adding the file");
-            let _ = state.ledger.jobs.insert(guid);
+            let _ = job_state.ledger.jobs.insert(guid);
             true
         } else {
             false
@@ -281,24 +267,23 @@ async fn append_to_ledger<const N1: usize, const N2: usize>(
     };
 
     if !is_owner && !address_book_is_empty {
-        Message::send_new_job_alert(guid, udp).await;
+        Message::send_new_job_alert(guid, &state.udp).await;
     }
 }
 
 /// Sends the given job's file to every other known machine on the network.
-async fn distribute_file<const N1: usize, const N2: usize>(
-    guid: Uuid,
-    address_book: &AddressBook<N1>,
-    udp: &UdpSocket<N2>,
-) {
-    // Do not want to hold onto the lock
-    let addrs = address_book.lock().await.clone();
-    for (addr, _v) in addrs {
-        let msg = format!("PUT {guid} to {addr}:{TCP_PORT}");
-        Message::send_log(&msg, udp).await;
-        if let Err(err) = put_file(guid, addr, TCP_PORT).await {
-            let err = format!("Put Error: {err}");
-            Message::send_log(&err, udp).await;
-        };
+#[embassy_executor::task(pool_size = 1)]
+pub async fn distribute_file(state: &'static DerustingState) {
+    loop {
+        let guid = state.files_to_distribute.receive().await;
+        let addrs = state.addresses.lock().await.clone();
+        for (addr, _v) in addrs {
+            let msg = format!(64; "PUT {guid} to {addr}:{TCP_PORT}").unwrap();
+            state.log_to_udp(&msg).await;
+            if let Err(err) = put_file(guid, addr, TCP_PORT).await {
+                let err = format!(64; "Put Error: {err}").unwrap();
+                state.log_to_udp(&err).await;
+            };
+        }
     }
 }

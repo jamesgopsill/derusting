@@ -1,9 +1,9 @@
 use core::ffi::{CStr, c_char, c_int, c_long};
+use core::fmt::Write as _;
 
 use crate::{log_error, log_info};
-use alloc::string::ToString as _;
 use embedded_io::Write as _;
-use heapless::CString;
+use heapless::{CString, String};
 use uuid::Uuid;
 
 /// Represents the `stdio.h` Fil struct. The Prusa firmware enables you
@@ -12,6 +12,19 @@ use uuid::Uuid;
 #[repr(C)]
 struct Fil {
     _opaque: [u8; 0],
+}
+
+/// Opaque handle for FatFs's native `DIR` directory-search object.
+/// Layout is only used by C; Rust never inspects its fields directly.
+#[repr(C, align(4))]
+pub struct Dir {
+    _opaque: [u8; 64],
+}
+
+impl Drop for Dir {
+    fn drop(&mut self) {
+        unsafe { f_closedir(self) };
+    }
 }
 
 /// Mirrors FatFs's FILINFO struct, for this firmware's config:
@@ -106,6 +119,28 @@ unsafe extern "C" {
     fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int;
 
     fn f_stat(path: *const c_char, fno: *mut FilInfo) -> FResult;
+
+    // FF_USE_FIND=1 is enabled in this firmware's FatFs config
+    // (buddy/include/buddy/ffconf.h), so FatFs itself supports glob-style
+    // pattern matching ("*.gcode") during directory iteration — no manual
+    // f_opendir/f_readdir + filename filtering loop is needed in Rust.
+
+    /// Start a pattern-matched directory search. `dp` must point at an
+    /// uninitialized/blank Dir object; on success it is populated with
+    /// the search state and `fno` with the first match (or
+    /// `fno.fname[0] == 0` if no match was found).
+    fn f_findfirst(
+        dp: *mut Dir,
+        fno: *mut FilInfo,
+        path: *const c_char,
+        pattern: *const c_char,
+    ) -> FResult;
+
+    /// Close a Dir object opened (internally, via f_opendir) by
+    /// f_findfirst. Must be called exactly once per successful
+    /// f_findfirst, regardless of whether a match was found, to release
+    /// its FF_FS_LOCK slot.
+    fn f_closedir(dp: *mut Dir) -> FResult;
 }
 
 /// A trait the produces the necesary flags for `fopen`
@@ -217,6 +252,76 @@ pub fn stat(path: &CStr) -> Result<FilInfo, FResult> {
     // which point it has fully written `info`, so `assume_init` is sound.
     let info = unsafe { info.assume_init() };
     Ok(info)
+}
+
+pub fn clean_usb() {
+    log_info!("Cleaning USB stick");
+    find_and_delete(c"*.gcode");
+    find_and_delete(c"*.partial");
+    log_info!("USB stick cleaned");
+}
+
+/// Repeatedly finds and deletes files matching `pattern` under `/usb/`,
+/// re-opening the scan after each delete (rather than deleting while
+/// the Dir handle from the match is still open) to match this
+/// firmware's only existing scan+delete precedent,
+/// remove_directory_recursive() in buddy/src/resources/bootstrap.cpp.
+fn find_and_delete(pattern: &CStr) {
+    loop {
+        let mut dir = core::mem::MaybeUninit::<Dir>::uninit();
+        let mut info = core::mem::MaybeUninit::<FilInfo>::uninit();
+        // SAFETY: pattern/native path are valid, nul-terminated C
+        // strings for the duration of this call; dir/info point to
+        // live, correctly-sized stack allocations that f_findfirst is
+        // documented to populate whenever it returns FResult::Ok.
+        let res = unsafe {
+            f_findfirst(
+                dir.as_mut_ptr(),
+                info.as_mut_ptr(),
+                c"0:".as_ptr(),
+                pattern.as_ptr(),
+            )
+        };
+
+        if res != FResult::Ok {
+            log_error!("clean_usb: find error: {res}");
+            return;
+        }
+
+        // SAFETY: only reached when f_findfirst returned FResult::Ok
+        // above, at which point it has fully written both dir and info.
+        let dir = unsafe { dir.assume_init() };
+        let info = unsafe { info.assume_init() };
+
+        // fname[0] == 0 is FatFs's signal for "no match found", even
+        // though the call itself still returns FResult::Ok.
+        if info.fname[0] == 0 {
+            return;
+        }
+
+        // Build "/usb/<fname>" from the returned name and delete it.
+        // fname is a NUL-terminated TCHAR (= c_char under this build's
+        // FF_LFN_UNICODE=2) array; CStr::from_ptr reads up to the NUL.
+        let mut path: String<64> = String::new();
+        // SAFETY: FatFs guarantees fname is NUL-terminated within its
+        // 256-byte buffer whenever f_findfirst returns FResult::Ok with
+        // fname[0] != 0.
+        let name = unsafe { CStr::from_ptr(info.fname.as_ptr()) };
+        if write!(path, "/usb/{}", name.to_str().unwrap_or("")).is_err() {
+            log_error!("clean_usb: path too long, skipping");
+            drop(dir); // closes via f_closedir before looping
+            continue;
+        }
+        let path = CString::<64>::from_bytes_with_nul(path.as_bytes()).unwrap();
+
+        drop(dir);
+
+        let ret = delete(&path);
+        if ret != 0 {
+            log_error!("clean_usb: failed to delete {path:?}");
+            return; // avoid an infinite loop if delete keeps failing
+        }
+    }
 }
 
 /// A Rust safe wrapper around a file.
@@ -350,14 +455,12 @@ pub fn test_file() {
 }
 
 /// Create the full file path for a given uuid.
-pub fn make_path(job_guid: &Uuid, partial: bool) -> CString<64> {
-    let mut path = CString::<64>::new();
-    let _ = path.extend_from_bytes(b"/usb/");
-    let _ = path.extend_from_bytes(job_guid.to_string().as_bytes());
+pub fn make_path(guid: &Uuid, partial: bool) -> CString<64> {
+    let mut path = String::<64>::new();
     if partial {
-        let _ = path.extend_from_bytes(b".partial");
+        write!(path, "/usb/{guid}.partial").unwrap()
     } else {
-        let _ = path.extend_from_bytes(b".gcode");
+        write!(path, "/usb/{guid}.gcode").unwrap()
     }
-    path
+    CString::<64>::from_bytes_with_nul(path.as_bytes()).unwrap()
 }
