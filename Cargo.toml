@@ -49,7 +49,6 @@ uuid = {
   default-features = false,
   features = ["serde", "v7"]
 }
-# portable-atomic = "1"
 postcard = {
   version = "1",
   default-features = false,
