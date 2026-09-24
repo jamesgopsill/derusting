@@ -1,17 +1,15 @@
 #![no_std]
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
+use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
 use embassy_sync::{
-    blocking_mutex::{Mutex, raw::ThreadModeRawMutex},
-    channel::Channel,
-    mutex::Mutex as AsyncMutex,
+    blocking_mutex::raw::ThreadModeRawMutex, channel::Channel, mutex::Mutex as AsyncMutex,
 };
 use embassy_time::Timer;
 use embassy_time_queue_utils::Queue;
 use heapless::LinearMap;
-use portable_atomic::{AtomicU32, AtomicU64};
 use static_cell::StaticCell;
 use uuid::Uuid;
 
@@ -52,9 +50,9 @@ pub const TCP_PORT: u16 = 8080;
 // Instantiate our Embassy Time Driver the interacts with FreeRTOS.
 // Designed for Embassy executors running inside a FreeRTOS task.
 embassy_time_driver::time_driver_impl!(static DRIVER: FreeRtosTimeDriver = FreeRtosTimeDriver {
-    queue: Mutex::new(RefCell::new(Queue::new())),
-    timekeeper: AtomicU64::new(u64::MIN),
-    free_rtos_now: AtomicU32::new(u32::MIN),
+    queue: CsMutex::new(RefCell::new(Queue::new())),
+    timekeeper: CsMutex::new(Cell::new(u64::MIN)),
+    free_rtos_now: CsMutex::new(Cell::new(u32::MIN)),
 });
 
 /// Static store for our Embassy Executor.
@@ -63,9 +61,11 @@ static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
 /// Reserving space for our task at compile time.
 /// We only need a small stack to hold the executor. The
 /// embassy task macro provides the stack memory required
-/// for each embassy task.
+/// for each embassy task
 const STACK_BYTES: usize = 1024 * 4; // / 4 for u32 stack words
+#[unsafe(link_section = ".ccmram")]
 static mut RTOS_STACK: [u8; STACK_BYTES] = [0u8; STACK_BYTES];
+#[unsafe(link_section = ".ccmram")]
 static mut RTOS_TCB: [u8; 128] = [0u8; 128];
 
 /// # Safety

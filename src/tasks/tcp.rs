@@ -279,11 +279,17 @@ pub async fn distribute_file(state: &'static DerustingState) {
         let guid = state.files_to_distribute.receive().await;
         let addrs = state.addresses.lock().await.clone();
         for (addr, _v) in addrs {
-            let msg = format!(64; "PUT {guid} to {addr}:{TCP_PORT}").unwrap();
+            let msg = format!(128; "PUT {guid} to {addr}:{TCP_PORT}").unwrap();
             state.log_to_udp(&msg).await;
-            if let Err(err) = put_file(guid, addr, TCP_PORT).await {
-                let err = format!(64; "Put Error: {err}").unwrap();
-                state.log_to_udp(&err).await;
+            match put_file(guid, addr, TCP_PORT).await {
+                Ok(_) => {
+                    let msg = format!(128; "FILE SENT [{addr}:{TCP_PORT}]").unwrap();
+                    state.log_to_udp(&msg).await;
+                }
+                Err(err) => {
+                    let msg = format!(128; "FILE FAIL [{addr}:{TCP_PORT}] {err}").unwrap();
+                    state.log_to_udp(&msg).await;
+                }
             };
         }
     }

@@ -3,14 +3,13 @@ use core::{
     marker::PhantomPinned,
     net::Ipv4Addr,
     pin::{Pin, pin},
-    sync::atomic::Ordering,
+    sync::atomic::{AtomicPtr, Ordering},
 };
 
 use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, signal::Signal};
 use embedded_io::Read;
 use heapless::Vec;
 use heapless::format;
-use portable_atomic::AtomicPtr;
 use uuid::Uuid;
 
 use crate::{

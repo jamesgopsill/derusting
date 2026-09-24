@@ -1,7 +1,11 @@
-use core::{ffi::c_void, marker::PhantomPinned, pin::Pin, sync::atomic::Ordering};
+use core::{
+    ffi::c_void,
+    marker::PhantomPinned,
+    pin::Pin,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
-use portable_atomic::AtomicPtr;
 
 use crate::{
     log_error, log_info,

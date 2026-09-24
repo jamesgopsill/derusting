@@ -171,7 +171,6 @@ dependencies = [
  "embedded-io",
  "getrandom",
  "heapless",
- "portable-atomic",
  "postcard",
  "serde",
  "static_cell",

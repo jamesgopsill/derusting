@@ -1,6 +1,4 @@
-use core::{ffi::CStr, ptr};
-
-use portable_atomic::AtomicPtr;
+use core::{ffi::CStr, ptr, sync::atomic::AtomicPtr};
 
 use crate::free_rtos::bindings::*;
 
