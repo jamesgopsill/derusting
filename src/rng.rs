@@ -1,8 +1,5 @@
 use core::ffi::c_void;
 
-use embassy_time::Instant;
-use uuid::{Timestamp, Uuid};
-
 // STM32 HAL Status codes
 #[repr(u32)]
 #[derive(Debug, PartialEq)]
@@ -70,21 +67,4 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
         }
     }
     Ok(())
-}
-
-/// Generates a UUIDv7, timestamped from time-since-boot and seeded with
-/// the STM32 hardware RNG.
-pub fn generate_uuid_v7() -> Uuid {
-    // Get time since boot (ms)
-    let now_ms = Instant::now().as_millis();
-
-    // Split into seconds and nanoseconds for the UUID v7 timestamp
-    let seconds = now_ms / 1000;
-    let nanos = (now_ms % 1000) as u32 * 1_000_000;
-
-    let ts = Timestamp::from_unix(uuid::NoContext, seconds, nanos);
-
-    // This call now automatically uses the STM32 Hardware RNG
-    // for the random bits!
-    Uuid::new_v7(ts)
 }

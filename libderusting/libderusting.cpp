@@ -3,7 +3,7 @@
 // src/common/marlin_server.cpp
 #include "marlin_server.hpp"
 #include "logging/log.hpp"
-#include "lwip/tcp.h"
+#include "lwip/netif.h"
 #include "lwip/tcpip.h"
 #include <semphr.h>
 #include <task.h>
@@ -29,26 +29,13 @@ extern "C" bool derusting_is_idle() {
 }
 
 
-// Wraps lwIP's tcp_sndbuf() so Rust can query a pcb's free send buffer.
-extern "C" u16_t derusting_tcp_sndbuf(const struct tcp_pcb *pcb) {
-    return tcp_sndbuf(pcb);
+// Returns the IPv4 address in network byte order, or 0 if the link is down.
+extern "C" uint32_t derusting_local_ipv4(void) {
+    uint32_t addr = 0;
+    LOCK_TCPIP_CORE();
+    if (netif_default && netif_is_up(netif_default) && netif_is_link_up(netif_default)) {
+        addr = ip4_addr_get_u32(netif_ip4_addr(netif_default));
+    }
+    UNLOCK_TCPIP_CORE();
+    return addr;
 }
-
-// Reports whether the calling task already holds lwIP's tcpip core lock,
-// so Rust knows whether it needs to take it before calling into lwIP.
-extern "C" bool derusting_holds_tcpip_core_lock(void) {
-  #if LWIP_TCPIP_CORE_LOCKING
-      SemaphoreHandle_t core_lock = reinterpret_cast<SemaphoreHandle_t>(lock_tcpip_core);
-      return xSemaphoreGetMutexHolder(core_lock) == xTaskGetCurrentTaskHandle();
-  #else
-    return false;
-  #endif
-}
-
-// libderusting.cpp
-// Reports whether lwIP is holding data on this pcb that the receive
-// callback previously refused (returned non-OK for).
-extern "C" bool derusting_tcp_has_refused_data(const struct tcp_pcb *pcb) {
-  return pcb->refused_data != nullptr;
-}
-

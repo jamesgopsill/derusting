@@ -1,51 +1,47 @@
 #![no_std]
+#![allow(unused)]
 
-use core::cell::{Cell, RefCell};
+use core::{
+    cell::{Cell, RefCell},
+    default,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    ptr::read,
+};
 
 use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
-use embassy_sync::{
-    blocking_mutex::raw::ThreadModeRawMutex, channel::Channel, mutex::Mutex as AsyncMutex,
+use embassy_futures::{
+    join::join,
+    select::{self, select},
 };
-use embassy_time::Timer;
+use embassy_sync::{
+    blocking_mutex::raw::ThreadModeRawMutex,
+    zerocopy_channel::{Channel, Receiver, Sender},
+};
+use embassy_time::{Duration, Ticker, Timer};
 use embassy_time_queue_utils::Queue;
-use heapless::LinearMap;
-use static_cell::StaticCell;
-use uuid::Uuid;
+use service::{TcpListener as _, TcpStream as _, UdpSocket as _};
+use static_cell::{ConstStaticCell, StaticCell};
 
 use crate::{
     free_rtos::{
-        bindings::{
-            pvParameters, uxTaskGetStackHighWaterMark, vTaskDelay, xPortGetFreeHeapSize,
-            xTaskGetCurrentTaskHandle,
-        },
+        bindings::{pvParameters, vTaskDelay, xTaskGetCurrentTaskHandle},
         executor::FreeRtosTaskExecutor,
         task::Task,
         time_driver::FreeRtosTimeDriver,
     },
-    fs::clean_usb,
-    kinds::{AddressBook, JobLedger},
-    lwip::{my_ipaddr, tcp::TcpListener, udp::UdpSocket},
-    marlin::{is_ready, set_offline},
-    tasks::{
-        messages::Message,
-        tcp::{distribute_file, tcp_worker},
-        udp::{address_book_lifetime_check, heartbeat, manage_ledger, udp_receiver},
-    },
+    lwip::UdpSocket,
+    service::{TcpListener as _, UdpSocket as _, Vfs},
 };
 
 mod free_rtos;
-mod fs;
-mod http;
-mod kinds;
 mod log;
 mod lwip;
-mod marlin;
 mod panic;
-mod tasks;
-
-pub const UDP_PORT: u16 = 9090;
-pub const TCP_PORT: u16 = 8080;
+mod platform;
+mod rng;
+mod service;
+mod vfs;
 
 // Instantiate our Embassy Time Driver the interacts with FreeRTOS.
 // Designed for Embassy executors running inside a FreeRTOS task.
@@ -63,9 +59,9 @@ static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
 /// embassy task macro provides the stack memory required
 /// for each embassy task
 const STACK_BYTES: usize = 1024 * 4; // / 4 for u32 stack words
-#[unsafe(link_section = ".ccmram")]
+// #[unsafe(link_section = ".ccmram")]
 static mut RTOS_STACK: [u8; STACK_BYTES] = [0u8; STACK_BYTES];
-#[unsafe(link_section = ".ccmram")]
+// #[unsafe(link_section = ".ccmram")]
 static mut RTOS_TCB: [u8; 128] = [0u8; 128];
 
 /// # Safety
@@ -115,19 +111,7 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut pvParameters) -> ! {
         log_error!("We should only be called within a FreeRTOS task.");
     }
 
-    match fs::stat(c"/usb/firmware.bbf") {
-        Ok(info) => log_info!("bbf file_size: {}", info.fsize),
-        Err(e) => log_error!("stat error: {e}"),
-    }
-
-    clean_usb();
-
-    log_info!("Is Ready: {}", is_ready());
-    set_offline();
-
-    // TODO: Clear `.gcode` files from the USB stick if it has old jobs on it.
     log_info!("Initialising Executor");
-
     let executor = EXECUTOR.init(FreeRtosTaskExecutor::new(current_task as _));
 
     executor.run(|spawner| match embassy_main(spawner) {
@@ -136,112 +120,20 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut pvParameters) -> ! {
     })
 }
 
-pub const ADDRESS_BOOK_ENTRIES: usize = 32;
-pub const UDP_CHANNEL_SIZE: usize = 12;
-pub const MAX_TCP_CONNECTIONS: usize = 1;
-pub const MAX_TCP_CONNECTION_CHANNEL_SIZE: usize = 12;
-
-pub struct DerustingState {
-    addresses: AddressBook<ADDRESS_BOOK_ENTRIES>,
-    jobs: JobLedger,
-    udp: UdpSocket<UDP_CHANNEL_SIZE>,
-    tcp: TcpListener<MAX_TCP_CONNECTIONS, MAX_TCP_CONNECTION_CHANNEL_SIZE>,
-    files_to_distribute: Channel<ThreadModeRawMutex, Uuid, 4>,
-}
-
-impl DerustingState {
-    fn new() -> Self {
-        let addresses = AsyncMutex::new(LinearMap::new());
-        let jobs = AsyncMutex::new(None);
-        let udp = UdpSocket::new();
-        let tcp = TcpListener::new();
-        let channel = Channel::new();
-        Self {
-            addresses,
-            jobs,
-            udp,
-            tcp,
-            files_to_distribute: channel,
-        }
-    }
-
-    async fn log_to_udp(&self, msg: &str) {
-        Message::send_log(msg, &self.udp).await;
-    }
-}
-
-static DERUSTING_STATE: StaticCell<DerustingState> = StaticCell::new();
-
 /// The main Embassy task: brings up UDP/TCP, waits for an IP address, then
 /// spawns the heartbeat, address-book, ledger and TCP worker tasks.
 #[embassy_executor::task(pool_size = 1)]
-async fn embassy_main(spawner: Spawner) {
-    log_stack_and_heap_size();
+async fn embassy_main(_spawner: Spawner) {
+    log_info!("Embassy Main");
+    let local = lwip::local_ipv4();
+    log_info!("Network IP: {local:?}");
+    let platform = platform::Platform::default();
 
-    let state = DerustingState::new();
-    let state = DERUSTING_STATE.init(state);
-
-    if state.udp.bind(UDP_PORT).await.is_err() {
-        log_critical!("UDP failed");
+    let Ok(mut service) =
+        service::Service::<lwip::UdpSocket, lwip::TcpListener, _, vfs::File>::new(platform).await
+    else {
+        log_error!("Failed to create service.");
         return;
     };
-    log_info!("UDP up on {UDP_PORT}");
-
-    if let Err(err) = state.tcp.listen(TCP_PORT).await {
-        log_critical!("TCP Failed: {err:?}");
-        return;
-    };
-    log_info!("TCP up on {TCP_PORT}");
-
-    // Wait for an IP address
-    loop {
-        if my_ipaddr().is_some() {
-            break;
-        };
-        Timer::after_secs(1).await;
-    }
-
-    match heartbeat(state) {
-        Ok(t) => spawner.spawn(t),
-        Err(e) => log_error!("Spawn Error: {e}"),
-    }
-    match address_book_lifetime_check(state) {
-        Ok(t) => spawner.spawn(t),
-        Err(e) => log_error!("Spawn Error: {e}"),
-    }
-    match manage_ledger(state) {
-        Ok(t) => spawner.spawn(t),
-        Err(e) => log_error!("Spawn Error: {e}"),
-    }
-    match udp_receiver(state) {
-        Ok(t) => spawner.spawn(t),
-        Err(e) => log_error!("Spawn Error: {e}"),
-    }
-    for _i in 0..MAX_TCP_CONNECTIONS {
-        match tcp_worker(state) {
-            Ok(t) => spawner.spawn(t),
-            Err(e) => log_error!("Spawn Error: {e}"),
-        }
-    }
-    match distribute_file(state) {
-        Ok(t) => spawner.spawn(t),
-        Err(e) => log_error!("Spawn Error: {e}"),
-    }
-}
-
-/// Logs the current task's free stack headroom and the FreeRTOS heap's
-/// free byte count, for diagnosing stack/heap pressure.
-fn log_stack_and_heap_size() {
-    // SAFETY: `uxTaskGetStackHighWaterMark` accepts a null handle to mean
-    // "the calling task"; this function is only ever called from inside the
-    // Embassy/FreeRTOS task, so that's the task we intend to query.
-    let free_stack_words = unsafe { uxTaskGetStackHighWaterMark(core::ptr::null_mut()) };
-    let free_stack_bytes = free_stack_words * core::mem::size_of::<usize>(); // 4 bytes on 32-bit ARM
-
-    // SAFETY: `xPortGetFreeHeapSize` takes no pointer arguments and has no
-    // preconditions beyond the FreeRTOS heap being initialised, which it is
-    // by the time any task (including this one) is running.
-    log_info!("Stack: {} bytes, Heap: {}", free_stack_bytes, unsafe {
-        xPortGetFreeHeapSize()
-    });
+    service.run().await;
 }

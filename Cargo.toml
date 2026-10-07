@@ -17,6 +17,10 @@ strip = true
 # large_stack_frames = "warn"
 
 [dependencies]
+bytemuck = {
+  version = "1",
+  default-features = false
+}
 const_format = "0.2"
 cortex-m = {
   version = "0.7",
@@ -44,22 +48,23 @@ heapless = {
   version = "0.9",
   features = ["serde"]
 }
-uuid = {
-  version = "1",
-  default-features = false,
-  features = ["serde", "v7"]
-}
 postcard = {
   version = "1",
   default-features = false,
 }
-static_cell = "2"
+rand = { version = "0.10", default-features = false, features = ["sys_rng"] }
 serde = {
   version = "1",
   default-features = false,
   features = ["derive"]
 }
+static_cell = "2"
 thiserror = {
   version = "2",
   default-features = false
+}
+uuid = {
+  version = "1",
+  default-features = false,
+  features = ["serde", "bytemuck", "v4"]
 }
