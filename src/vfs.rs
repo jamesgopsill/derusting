@@ -1,6 +1,9 @@
 use core::ffi::{c_char, c_int, c_long};
 
-use crate::{log_error, service::Vfs};
+use crate::{
+    log_error,
+    service::{Vfs, VfsFlag},
+};
 
 unsafe extern "C" {
     /// Opens a file.
@@ -120,7 +123,7 @@ impl embedded_io::Read for File {
 }
 
 impl crate::service::Vfs for File {
-    async fn open(path: &str) -> Result<Self, Self::Error> {
+    async fn open(path: &str, flag: VfsFlag) -> Result<Self, Self::Error> {
         if !path.starts_with("/usb/") {
             log_error!("Path must start with /usb/");
             return Err(Self::Error::INVALID_INPUT);
@@ -132,8 +135,11 @@ impl crate::service::Vfs for File {
         // SAFETY: `path` and `mode.as_cstr()` are both valid, nul-terminated C
         // strings for the duration of the call. `fopen` returns either null or
         // a pointer owned by the C runtime that we take ownership of via `File`
-        // (closed in `File::drop`).
-        let res = unsafe { fopen(c.as_ptr(), c"wb".as_ptr()) };
+        // (closed in `File::drop`);
+        let res = match flag {
+            VfsFlag::Write => unsafe { fopen(c.as_ptr(), c"wb".as_ptr()) },
+            VfsFlag::Read => unsafe { fopen(c.as_ptr(), c"rb".as_ptr()) },
+        };
         if res.is_null() {
             Err(Self::Error::INVALID_INPUT)
         } else {
@@ -176,28 +182,6 @@ impl crate::service::Vfs for File {
         let _ = unsafe { rename(c_src.as_ptr(), c_dest.as_ptr()) };
         // TODO. Check the error
         Ok(())
-    }
-
-    async fn exists(path: &str) -> bool {
-        if !path.starts_with("/usb/") {
-            log_error!("Path must start with /usb/");
-            return false;
-        }
-        let mut c = heapless::CString::<64>::new();
-        if c.extend_from_bytes(path.as_bytes()).is_err() {
-            return false;
-        };
-        // SAFETY: `path` and `mode.as_cstr()` are both valid, nul-terminated C
-        // strings for the duration of the call. `fopen` returns either null or
-        // a pointer owned by the C runtime that we take ownership of via `File`
-        // (closed in `File::drop`).
-        let res = unsafe { fopen(c.as_ptr(), c"rb".as_ptr()) };
-        if res.is_null() {
-            false
-        } else {
-            unsafe { fclose(res) };
-            true
-        }
     }
 }
 

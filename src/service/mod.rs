@@ -25,7 +25,13 @@ use uuid::Uuid;
 
 use message::{Message, OwnedLedger, Payload::Heartbeat};
 
+use crate::{
+    lwip,
+    service::{message::OwnedGcode, transfer::FileTransfer},
+};
+
 mod message;
+mod transfer;
 
 const UDP_PORT: u16 = 9090;
 const TCP_PORT: u16 = 8080;
@@ -109,16 +115,23 @@ where
     fn accept(&self) -> impl Future<Output = Result<Self::TcpStream, Self::Error>>;
 }
 
+pub enum VfsFlag {
+    Read,
+    Write,
+}
+
 pub trait Vfs: embedded_io::ErrorType
 where
     Self: Sized + embedded_io::Write + embedded_io::Read,
 {
     // Option. add rw flags.
-    fn open(path: &str) -> impl Future<Output = Result<Self, Self::Error>>;
+    fn open(path: &str, flag: VfsFlag) -> impl Future<Output = Result<Self, Self::Error>>;
     fn delete(path: &str) -> impl Future<Output = Result<(), Self::Error>>;
     fn rename(src: &str, dest: &str) -> impl Future<Output = Result<(), Self::Error>>;
     fn close(self) {}
-    fn exists(path: &str) -> impl Future<Output = bool>;
+    fn exists(path: &str) -> impl Future<Output = bool> {
+        async { Self::open(path, VfsFlag::Read).await.is_ok() }
+    }
 }
 
 pub enum ServiceError<U, T>
@@ -171,6 +184,10 @@ where
             Ok((_, tcp)) => tcp,
             Err(err) => return Err(ServiceError::Tcp(err)),
         };
+        let local_ip = lwip::local_ipv4().unwrap();
+        let msg = heapless::format!(64; "Serving UDP on {}", local_ip).unwrap();
+        let _ = Message::send_log(&msg, &udp).await;
+        let local = SocketAddrV4::new(local_ip, 9090);
         let peers: Mutex<NoopRawMutex, PeerMap> = Mutex::new(LinearMap::new());
         let ledger: Mutex<NoopRawMutex, OwnedLedger> = Mutex::new(OwnedLedger::new(local));
         Ok(Self {
@@ -191,7 +208,8 @@ where
         let fut_02 = self.udp_receive_handler();
         let fut_03 = self.manage_ledger();
         let fut_04 = self.tcp_accept();
-        let fut = embassy_futures::join::join4(fut_01, fut_02, fut_03, fut_04);
+        let fut_05 = self.manage_peers();
+        let fut = embassy_futures::join::join5(fut_01, fut_02, fut_03, fut_04, fut_05);
         let _ = fut.await;
     }
 
@@ -210,6 +228,7 @@ where
         static BUF: ConstStaticCell<[u8; 1024]> = ConstStaticCell::new([0u8; 1024]);
         let buf = BUF.take();
         let mut history: HistoryBuf<Uuid, 32> = HistoryBuf::new();
+        let mut transfer: Option<FileTransfer<V>> = None;
         loop {
             let Ok((remote, packet)) = self.udp.receive(buf.as_mut()).await else {
                 self.platform.log("Packet Receive Error");
@@ -252,7 +271,33 @@ where
                     // Do nothing. This is for a logging
                     // tool for demo purposes
                 }
+                message::Payload::Gcode(gcode) => {
+                    if gcode.chunk_id == 0
+                        && transfer.is_none()
+                        && let Ok(t) = FileTransfer::<V>::new(&gcode).await
+                    {
+                        let _ = Message::send_log("Transfer Recv Start", &self.udp).await;
+                        transfer = Some(t);
+                        continue;
+                    }
+                    if let Some(t1) = transfer.take()
+                        && let Ok(t2) = t1.digest(&gcode).await
+                    {
+                        transfer = t2;
+                        if transfer.is_none() {
+                            let _ = Message::send_log("Transfer Recv Stop", &self.udp).await;
+                        }
+                    }
+                }
             }
+        }
+    }
+
+    pub async fn manage_peers(&self) {
+        loop {
+            Timer::after_secs(10).await;
+            let mut peers = self.peers.lock().await;
+            peers.retain(|_k, instant| instant.elapsed().as_secs() < 20);
         }
     }
 
@@ -276,7 +321,9 @@ where
             if (ledger.owner != self.local) {
                 // It is not me
                 if (ledger.updated.elapsed() > Duration::from_secs(20)) {
-                    self.platform.log("Ledger has not updated. Taking over.");
+                    let msg = heapless::format!(64; "{} taking over", self.local).unwrap();
+                    self.platform.log(&msg);
+                    let _ = Message::send_log(&msg, &self.udp).await;
                     // It is not me but I haven't seen a more recent one being passed about.
                     // I will take it upon myself to start the process again.
                     ledger.owner = self.local;
@@ -396,7 +443,7 @@ where
                         None => Uuid::new_v4(),
                     };
                     let partial_path = heapless::format!(64; "/usb/{}.partial", guid).unwrap();
-                    let Ok(mut fil) = V::open(partial_path.as_str()).await else {
+                    let Ok(mut fil) = V::open(partial_path.as_str(), VfsFlag::Write).await else {
                         self.platform.log("File open error");
                         let _ = stream.internal_server_error().await;
                         continue;
@@ -466,6 +513,35 @@ where
                     if stream.pong().await.is_err() {
                         self.platform.log("TCP stream write err");
                     };
+
+                    // Tcp complete now share the file around UDP but
+                    // note this should be move out of this separate task
+                    // as it currently prevents new tcp streams.
+                    let Ok(mut fil) = V::open(&final_path, VfsFlag::Read).await else {
+                        continue;
+                    };
+                    let mut chunk = OwnedGcode {
+                        guid,
+                        chunk_id: 0,
+                        last_chunk: false,
+                        data: [0u8; 768],
+                    };
+                    loop {
+                        let Ok(res) = fil.read(&mut chunk.data) else {
+                            self.platform.log("Read error");
+                            break;
+                        };
+                        if res < chunk.data.len() {
+                            // EOF
+                            chunk.last_chunk = true;
+                            let _ = Message::send_gcode(chunk.share(), &self.udp).await;
+                            break;
+                        }
+                        let _ = Message::send_gcode(chunk.share(), &self.udp).await;
+                        chunk.chunk_id += 1;
+                        Timer::after_millis(500).await
+                    }
+
                     continue;
                 }
             }

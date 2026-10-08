@@ -21,7 +21,7 @@ const MAX_JOBS: usize = 32;
 #[derive(Debug, Clone)]
 pub(crate) struct OwnedLedger {
     pub owner: SocketAddrV4,
-    jobs: Vec<Uuid, 32>,
+    jobs: Vec<Uuid, MAX_JOBS>,
     pub updated: Instant,
 }
 
@@ -116,6 +116,45 @@ impl From<SharedLedger<'_>> for OwnedLedger {
     }
 }
 
+#[derive(Debug)]
+pub struct OwnedGcode {
+    pub guid: Uuid,
+    pub chunk_id: u32,
+    pub last_chunk: bool,
+    pub data: [u8; 768],
+}
+
+impl OwnedGcode {
+    pub fn share(&self) -> SharedGcode<'_> {
+        SharedGcode {
+            guid: self.guid,
+            chunk_id: self.chunk_id,
+            last_chunk: self.last_chunk,
+            data: &self.data,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SharedGcode<'a> {
+    pub guid: Uuid,
+    pub chunk_id: u32,
+    pub last_chunk: bool,
+    #[serde(borrow)]
+    pub data: &'a [u8],
+}
+
+/// The kinds of message broadcast over UDP between machines.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Payload<'a> {
+    Heartbeat(&'a str),
+    NewJob(Uuid),
+    Ledger(SharedLedger<'a>),
+    #[serde(borrow)]
+    Log(&'a str),
+    Gcode(SharedGcode<'a>),
+}
+
 /// The envelope every UDP message is wrapped in, carrying an idempotency
 /// key used to drop duplicate deliveries.
 #[derive(Debug, Serialize, Deserialize)]
@@ -147,6 +186,15 @@ impl<'a> Message<'a> {
         Self::send(&msg, udp).await
     }
 
+    pub async fn send_gcode<U: UdpSocket>(gcode: SharedGcode<'a>, udp: &U) -> Result<(), U::Error> {
+        let idempotency = Uuid::new_v4();
+        let msg = Self {
+            idempotency,
+            payload: Payload::Gcode(gcode),
+        };
+        Self::send(&msg, udp).await
+    }
+
     pub async fn send_new_job<U: UdpSocket>(guid: Uuid, udp: &U) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
         let msg = Self {
@@ -171,16 +219,6 @@ impl<'a> Message<'a> {
         }
         Ok(())
     }
-}
-
-/// The kinds of message broadcast over UDP between machines.
-#[derive(Debug, Serialize, Deserialize)]
-pub enum Payload<'a> {
-    Heartbeat(&'a str),
-    NewJob(Uuid),
-    Ledger(SharedLedger<'a>),
-    #[serde(borrow)]
-    Log(&'a str),
 }
 
 /// Wire format for a job list: one length-prefixed byte string of `n * 16`

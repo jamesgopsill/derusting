@@ -125,8 +125,20 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut pvParameters) -> ! {
 #[embassy_executor::task(pool_size = 1)]
 async fn embassy_main(_spawner: Spawner) {
     log_info!("Embassy Main");
-    let local = lwip::local_ipv4();
-    log_info!("Network IP: {local:?}");
+
+    let empty = Ipv4Addr::new(0, 0, 0, 0);
+    loop {
+        let Some(local) = lwip::local_ipv4() else {
+            Timer::after_millis(500).await;
+            continue;
+        };
+        if local == empty {
+            Timer::after_millis(500).await;
+            continue;
+        }
+        log_info!("Network IP: {local:?}");
+        break;
+    }
     let platform = platform::Platform::default();
 
     let Ok(mut service) =
