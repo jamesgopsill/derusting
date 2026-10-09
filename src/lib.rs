@@ -1,37 +1,21 @@
 #![no_std]
-#![allow(unused)]
 
 use core::{
     cell::{Cell, RefCell},
-    default,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    ptr::read,
+    net::Ipv4Addr,
 };
 
 use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
-use embassy_futures::{
-    join::join,
-    select::{self, select},
-};
-use embassy_sync::{
-    blocking_mutex::raw::ThreadModeRawMutex,
-    zerocopy_channel::{Channel, Receiver, Sender},
-};
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::Timer;
 use embassy_time_queue_utils::Queue;
-use service::{TcpListener as _, TcpStream as _, UdpSocket as _};
-use static_cell::{ConstStaticCell, StaticCell};
+use static_cell::StaticCell;
 
-use crate::{
-    free_rtos::{
-        bindings::{pvParameters, vTaskDelay, xTaskGetCurrentTaskHandle},
-        executor::FreeRtosTaskExecutor,
-        task::Task,
-        time_driver::FreeRtosTimeDriver,
-    },
-    lwip::UdpSocket,
-    service::{TcpListener as _, UdpSocket as _, Vfs},
+use crate::free_rtos::{
+    bindings::{pvParameters, vTaskDelay, xTaskGetCurrentTaskHandle},
+    executor::FreeRtosTaskExecutor,
+    task::Task,
+    time_driver::FreeRtosTimeDriver,
 };
 
 mod free_rtos;
@@ -123,7 +107,7 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut pvParameters) -> ! {
 /// The main Embassy task: brings up UDP/TCP, waits for an IP address, then
 /// spawns the heartbeat, address-book, ledger and TCP worker tasks.
 #[embassy_executor::task(pool_size = 1)]
-async fn embassy_main(spawner: Spawner) {
+async fn embassy_main(_spawner: Spawner) {
     log_info!("Embassy Main");
 
     let empty = Ipv4Addr::new(0, 0, 0, 0);

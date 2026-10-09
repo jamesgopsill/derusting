@@ -1,7 +1,5 @@
 use core::ffi::c_char;
 
-use heapless::CString;
-
 use crate::{log_info, lwip};
 
 // Extern "C" functions exposed by our glue layer - `libderusting.cpp`.
@@ -48,10 +46,18 @@ impl crate::service::Platform for Platform {
             let cmd = heapless::format!(64; "M32 /usb/{}.gcode\0", guid).unwrap();
             // SAFETY: `c"M111 S8"` is a `'static` nul-terminated C string
             // literal, valid for the duration of the call.
-            let res = unsafe { derusting_gcode_cmd(c"M111 S8".as_ptr()) };
+            let _ = unsafe { derusting_gcode_cmd(c"M111 S8".as_ptr()) };
             // SAFETY: `cmd` is a `heapless::CString` we just built above; its
             // buffer is nul-terminated and remains valid for this call.
-            unsafe { derusting_gcode_cmd(cmd.as_ptr()) }
+            let res = unsafe { derusting_gcode_cmd(cmd.as_ptr()) };
+            if res {
+                // SAFETY: see `is_ready` above for why referencing this static is sound.
+                unsafe { derusting_ready_flag.store(false, core::sync::atomic::Ordering::SeqCst) };
+                // SAFETY: `derusting_update_ui` takes no arguments; it is documented as
+                // safe to call whenever the ready flag has changed.
+                unsafe { derusting_update_ui() };
+            }
+            res
         } else {
             false
         }

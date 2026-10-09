@@ -1,22 +1,19 @@
 use core::{
-    alloc,
     cell::RefCell,
     net::{Ipv4Addr, SocketAddrV4},
 };
 
-use bytemuck::pod_align_to;
 use embassy_time::{Instant, Timer};
 use heapless::{HistoryBuf, Vec};
 use rand::{RngExt, rngs::SmallRng};
 use serde::{Deserialize, Serialize};
-use static_cell::ConstStaticCell;
 use uuid::Uuid;
 
 use crate::service::Vfs;
 
 use super::{BROADCAST_ADDR, UdpSocket};
 
-const MAX_JOBS: usize = 32;
+const MAX_JOBS: usize = 48;
 
 /// The token-ring ledger of pending jobs, tracking which machine currently
 /// owns it.
@@ -63,10 +60,6 @@ impl OwnedLedger {
         }
     }
 
-    pub fn pop_front(&mut self) -> Option<Uuid> {
-        (!self.jobs.is_empty()).then(|| self.jobs.remove(0))
-    }
-
     pub async fn pick_one<V>(&self) -> Option<Uuid>
     where
         V: Vfs,
@@ -94,16 +87,6 @@ pub struct SharedLedger<'a> {
     pub owner: Ipv4Addr,
     #[serde(borrow, with = "uuid_slice")]
     jobs: &'a [Uuid],
-}
-
-impl SharedLedger<'_> {
-    pub fn jobs(&self) -> &[Uuid] {
-        self.jobs
-    }
-
-    pub fn contains(&self, id: &Uuid) -> bool {
-        self.jobs.contains(id)
-    }
 }
 
 impl From<SharedLedger<'_>> for OwnedLedger {
@@ -165,8 +148,6 @@ pub struct Message<'a> {
     #[serde(borrow)]
     pub payload: Payload<'a>,
 }
-
-type Type = Uuid;
 
 pub struct MessageManager<U>
 where

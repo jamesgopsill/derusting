@@ -45,7 +45,7 @@ where
             return Ok(None);
         }
         // it is so write the data
-        if let Err(err) = self.fil.write_all(gcode.data) {
+        if let Err(_err) = self.fil.write_all(gcode.data) {
             let fil = self.fil;
             fil.close();
             let partial_path = heapless::format!(64; "/usb/{}.partial", gcode.guid).unwrap();

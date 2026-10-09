@@ -1,11 +1,9 @@
 use core::ffi::{c_char, c_int, c_long};
 
-use crate::{
-    log_error,
-    service::{Vfs, VfsFlag},
-};
+use crate::{log_error, service::VfsFlag};
 
 unsafe extern "C" {
+    #![allow(unused)]
     /// Opens a file.
     fn fopen(path: *const c_char, flags: *const c_char) -> *mut Fil;
 
@@ -34,20 +32,6 @@ unsafe extern "C" {
     /// Renames or moves a file.
     /// Returns 0 on success, or a non-zero value / -1 on failure.
     fn rename(oldpath: *const c_char, newpath: *const c_char) -> c_int;
-}
-
-/// Mirrors FatFs's FILINFO struct, for this firmware's config:
-/// FF_FS_EXFAT=0 (fsize is u32), FF_USE_LFN=2 (altname+fname present,
-/// stack-allocated working buffer), FF_LFN_UNICODE=2 (TCHAR=UTF-8 char),
-/// FF_SFN_BUF=34, FF_LFN_BUF=255.
-#[repr(C)]
-pub struct FilInfo {
-    pub fsize: u32,
-    pub fdate: u16,
-    pub ftime: u16,
-    pub fattrib: u8,
-    pub altname: [c_char; 35],
-    pub fname: [c_char; 256],
 }
 
 /// Represents the `stdio.h` Fil struct.

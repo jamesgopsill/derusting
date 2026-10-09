@@ -2,12 +2,9 @@ use core::{
     ffi::{c_int, c_long, c_void},
     fmt,
     net::{Ipv4Addr, SocketAddrV4},
-    ops::SubAssign,
 };
 
-use embassy_time::{Duration, Ticker, Timer};
-
-use crate::{log_info, lwip::ffi::lwip_socket};
+use embassy_time::Timer;
 
 const AF_INET: c_int = 2;
 const SOCK_DGRAM: c_int = 2;
@@ -18,6 +15,7 @@ const SOL_SOCKET: c_int = 0xfff;
 const SO_REUSEADDR: c_int = 0x0004;
 
 mod ffi {
+    #![allow(unused)]
     use super::sockaddr_in;
     use core::ffi::{c_int, c_long, c_void};
 

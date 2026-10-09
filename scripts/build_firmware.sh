@@ -62,16 +62,14 @@ if [[ "$2" == "yes" ]]; then {
     -DCONNECT:STRING=NO \
     -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
     -DHAS_NFC:BOOL=OFF
-}; else
-  {
-    python utils/build.py --preset mini --build-type release --bootloader no \
-      -DWUI:STRING=YES \
-      -DBUDDY_ENABLE_WUI:BOOL=YES \
-      -DCONNECT:STRING=NO \
-      -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
-      -DHAS_NFC:BOOL=OFF
-  }
-fi
+}; else {
+  python utils/build.py --preset mini --build-type release --bootloader no \
+    -DWUI:STRING=YES \
+    -DBUDDY_ENABLE_WUI:BOOL=YES \
+    -DCONNECT:STRING=NO \
+    -DBUDDY_ENABLE_CONNECT:BOOL=OFF \
+    -DHAS_NFC:BOOL=OFF
+}; fi
 
 cd ..
 

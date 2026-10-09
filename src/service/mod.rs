@@ -1,33 +1,20 @@
-#![no_std]
-
 use core::{
-    convert::Infallible,
-    fmt::Arguments,
-    iter::Chain,
     marker::PhantomData,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    slice::Split,
-    time,
+    net::{Ipv4Addr, SocketAddrV4},
 };
 
-use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel, mutex::Mutex};
 use embassy_time::{Duration, Instant, Ticker, Timer};
-use heapless::{
-    HistoryBuf, LinearMap, Vec, format, index_map::Entry::Occupied, index_set::FnvIndexSet,
-};
+use heapless::LinearMap;
 use rand::{RngExt as _, rngs::SmallRng};
-use static_cell::{ConstStaticCell, StaticCell};
+use static_cell::ConstStaticCell;
 use uuid::Uuid;
 
-use message::{Message, OwnedLedger, Payload::Heartbeat};
+use message::OwnedLedger;
 
-use crate::{
-    lwip,
-    service::{
-        message::{MessageManager, OwnedGcode},
-        transfer::FileTransfer,
-    },
+use crate::service::{
+    message::{MessageManager, OwnedGcode},
+    transfer::FileTransfer,
 };
 
 mod message;
@@ -74,6 +61,7 @@ where
     Self: Sized,
 {
     type Error: core::error::Error;
+    #[allow(unused)]
     fn connect(remote: SocketAddrV4) -> impl Future<Output = Result<Self, Self::Error>>;
     fn read<'a>(&self, buf: &'a mut [u8]) -> impl Future<Output = Result<&'a [u8], Self::Error>>;
     fn write(&self, buf: &[u8]) -> impl Future<Output = Result<usize, Self::Error>>;
@@ -200,11 +188,6 @@ where
     pub async fn run(&mut self) {
         let args = format_args!("Running derusting on {:?}", self.platform.local());
         self.platform.log(args);
-        static CHANNEL: ConstStaticCell<Channel<NoopRawMutex, Uuid, 8>> =
-            ConstStaticCell::new(Channel::new());
-        let channel = CHANNEL.take();
-        let sender = channel.sender();
-        let receiver = channel.receiver();
         let fut_01 = self.heartbeat();
         let fut_02 = self.udp_receive_handler();
         let fut_03 = self.manage_ledger();
@@ -240,7 +223,8 @@ where
             // Update address book.
             {
                 let mut peers = self.peers.lock().await;
-                peers.insert(remote, Instant::now());
+                // Max out at 32.
+                let _ = peers.insert(remote, Instant::now());
             }
 
             match msg.payload {
@@ -251,7 +235,8 @@ where
                 }
                 message::Payload::NewJob(job) => {
                     let mut ledger = self.ledger.lock().await;
-                    ledger.insert(job);
+                    // can max out
+                    let _ = ledger.insert(job);
                 }
                 message::Payload::Ledger(shared_ledger) => {
                     let mut ledger = self.ledger.lock().await;
@@ -322,10 +307,10 @@ where
             // If I don't own the ledger then all I will do
             // is check whether I have not seen it change
             // ownership in a while.
-            if (ledger.owner != local) {
+            if ledger.owner != local {
                 // It is not me. Lets check if it is an empty ip address.
-                if (ledger.updated.elapsed() > Duration::from_secs(20)
-                    || ledger.owner.is_unspecified())
+                if ledger.updated.elapsed() > Duration::from_secs(20)
+                    || ledger.owner.is_unspecified()
                 {
                     let fargs = format_args!("Taking ownership.");
                     self.platform.log(fargs);
@@ -490,7 +475,7 @@ where
 
                     // The stream did not give us enough data
                     if more_data_needed {
-                        fil.flush();
+                        let _ = fil.flush();
                         fil.close();
                         let _ = V::delete(&partial_path).await;
                         if stream.bad_request().await.is_err() {
@@ -501,7 +486,7 @@ where
 
                     // Received all the data. Lets close and
                     // rename it.
-                    fil.flush();
+                    let _ = fil.flush();
                     fil.close();
 
                     let final_path = heapless::format!(64; "/usb/{}.gcode", guid).unwrap();
@@ -520,7 +505,7 @@ where
                     // Add it to our ledger. Does it matter if we own
                     // it or not so we stay up to date.
                     let mut ledger = self.ledger.lock().await;
-                    ledger.insert(guid);
+                    let _ = ledger.insert(guid);
 
                     if stream.pong().await.is_err() {
                         self.platform.log(format_args!("TCP stream write err"));
