@@ -1,6 +1,6 @@
 use core::ffi::c_void;
 
-// STM32 HAL Status codes
+/// STM32 HAL status codes, as returned by `HAL_RNG_GenerateRandomNumber`.
 #[repr(u32)]
 #[derive(Debug, PartialEq)]
 #[allow(unused)]
@@ -11,14 +11,25 @@ pub enum HalStatus {
     Timeout = 0x03,
 }
 
+// SAFETY: both declarations must match the firmware's STM32 HAL definitions:
+// `hrng` is the RNG handle (only its address is used, so it is declared
+// opaque) and `HAL_RNG_GenerateRandomNumber` takes that handle and an output
+// pointer, returning a HAL status code.
 unsafe extern "C" {
-    // Hardware RNG
+    /// Hardware RNG handle owned by the HAL (used by address only).
     static hrng: c_void;
-    // The hardware rng fcn.
+    /// Writes one 32-bit hardware random word to `random`; returns a
+    /// `HalStatus` code.
     fn HAL_RNG_GenerateRandomNumber(hrng_ptr: *const c_void, random: *mut u32) -> u32;
 }
 
+// SAFETY: `getrandom` looks this symbol up by its unmangled name as its
+// custom backend (`__getrandom_v03_custom`); no other item uses that name.
 #[unsafe(no_mangle)]
+/// Fills `dest[..len]` with hardware random bytes for the `getrandom` crate.
+/// Retries while the RNG reports `Busy` and returns an error on any other
+/// non-`Ok` status.
+///
 /// # Safety
 /// Called by the `getrandom` crate as its custom backend; `dest` must be
 /// valid for writes of `len` bytes for the duration of this call (the

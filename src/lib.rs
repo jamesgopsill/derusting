@@ -30,6 +30,10 @@ mod vfs;
 
 // Instantiate our Embassy Time Driver the interacts with FreeRTOS.
 // Designed for Embassy executors running inside a FreeRTOS task.
+//
+// SAFETY: `time_driver_impl!` registers `DRIVER` as the one global time driver
+// by exporting unmangled symbols that `embassy-time` resolves at link time;
+// it must be invoked exactly once in the final binary, which this is.
 embassy_time_driver::time_driver_impl!(static DRIVER: FreeRtosTimeDriver = FreeRtosTimeDriver {
     queue: CsMutex::new(RefCell::new(Queue::new())),
     timekeeper: CsMutex::new(Cell::new(u64::MIN)),
@@ -39,30 +43,39 @@ embassy_time_driver::time_driver_impl!(static DRIVER: FreeRtosTimeDriver = FreeR
 /// Static store for our Embassy Executor.
 static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
 
-/// Reserving space for our task at compile time.
-/// We only need a small stack to hold the executor. The
-/// embassy task macro provides the stack memory required
-/// for each embassy task
-///
+/// Forces 8-byte alignment of the wrapped value, as the FreeRTOS (Cortex-M)
+/// port requires for task stacks and TCBs.
 #[repr(C, align(8))]
 pub struct Aligned<T>(pub T);
 
+/// Size of the FreeRTOS task stack, in bytes (despite the name):
+/// `Task::new_static` divides the buffer length by 4 to get FreeRTOS words.
+/// We only need a small stack to hold the executor. The embassy task macro
+/// provides the stack memory required for each embassy task.
 const STACK_WORDS: usize = 1024 * 6;
+/// Size in bytes of the buffer handed to FreeRTOS as the task control block.
 const TCB_BYTES: usize = 128;
 
+/// Statically reserved stack and TCB for the Embassy FreeRTOS task, taken
+/// once in `derusting_main`.
 static RTOS_STACK: ConstStaticCell<Aligned<[u8; STACK_WORDS]>> =
     ConstStaticCell::new(Aligned([0; STACK_WORDS]));
 static RTOS_TCB: ConstStaticCell<Aligned<[u8; TCB_BYTES]>> =
     ConstStaticCell::new(Aligned([0; TCB_BYTES]));
 
+/// Entry point called by the Buddy firmware: creates the static FreeRTOS task
+/// that runs the Embassy executor.
+///
 /// # Safety
 /// We will ensure that we call this function in an
 /// appropriate place in the Buddy firmware. Additionally, this must be called at
 /// most once for the life of the program: `RTOS_STACK`/`RTOS_TCB` are handed
 /// to FreeRTOS as the new task's stack/TCB storage and remain
-/// aliased by that task for as long as it exists, so a second call would
-/// create two tasks sharing (and
-/// corrupting) the same underlying memory.
+/// aliased by that task for as long as it exists. A second call would panic
+/// in `ConstStaticCell::take` rather than create a second task over the same
+/// memory.
+// SAFETY: the firmware's C++ glue calls this function by its unmangled name,
+// so the symbol must be exported as-is; no other item uses this name.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn derusting_main() {
     log_info!("derusting_main()");
@@ -85,6 +98,9 @@ pub unsafe extern "C" fn derusting_main() {
 /// valid FreeRTOS task context (so `vTaskDelay`/`xTaskGetCurrentTaskHandle`
 /// below are well-defined) and that `RTOS_STACK`/`RTOS_TCB` remain alive and
 /// exclusively owned by this task for as long as it runs.
+// SAFETY: the symbol is exported unmangled; no other item uses this name. In
+// this crate it is only reached through the function pointer passed to
+// `Task::new_static`, never called directly.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn embassy(_pv_parameters: *mut pvParameters) -> ! {
     log_info!("Rust Embassy Task. Waiting 5secs...");

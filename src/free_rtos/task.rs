@@ -10,8 +10,14 @@ use crate::free_rtos::bindings::*;
 pub struct Task(NonNull<tskTaskControlBlock>);
 
 impl Task {
-    /// # Safety (caller contract, not marked `unsafe fn` but relied upon)
-    /// `stack_buf` and `tcb_buf` must be `'static` (or otherwise outlive the
+    /// Creates a FreeRTOS task from caller-provided static buffers and
+    /// returns a handle, or `None` if FreeRTOS returned a null handle.
+    /// `stack_buf.len()` is in bytes; it is converted to FreeRTOS words
+    /// (divided by 4, truncated to `u16`).
+    ///
+    /// # Safety
+    /// This is not marked `unsafe fn`, but the caller must uphold the
+    /// following contract: `stack_buf` and `tcb_buf` must be `'static` (or otherwise outlive the
     /// created task) and must not be read or written by anything else once
     /// passed in, since FreeRTOS uses them in place as the task's stack and
     /// TCB for as long as the task exists.
@@ -39,6 +45,7 @@ impl Task {
         Self::from_raw(handle)
     }
 
+    /// Wraps a raw task handle, returning `None` if it is null.
     pub fn from_raw(handle: TaskHandle_t) -> Option<Self> {
         NonNull::new(handle).map(Self)
     }

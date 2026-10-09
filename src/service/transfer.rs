@@ -1,3 +1,5 @@
+/// An in-progress receive of a gcode file sent as UDP chunks, written to
+/// `/usb/<guid>.partial` and renamed to `.gcode` when the last chunk arrives.
 pub struct FileTransfer<V>
 where
     V: super::Vfs,
@@ -11,6 +13,8 @@ impl<V> FileTransfer<V>
 where
     V: super::Vfs,
 {
+    /// Starts a transfer from its first chunk: creates the `.partial` file
+    /// and writes that chunk's data to it.
     pub async fn new(gcode: &super::message::SharedGcode<'_>) -> Result<Self, V::Error> {
         // TODO: include gcode id check but needs to map to V::Error
         let partial_path = heapless::format!(64; "/usb/{}.partial", gcode.guid).unwrap();
@@ -23,6 +27,11 @@ where
         })
     }
 
+    /// Processes the next chunk. Returns `Ok(Some(self))` to keep going
+    /// (also for chunks of another file or duplicates, which are ignored),
+    /// and `Ok(None)` when the transfer is over: either complete (the file
+    /// is renamed to `.gcode`) or abandoned (out-of-order chunk or write error,
+    /// so the `.partial` file is deleted).
     pub async fn digest(
         mut self,
         gcode: &super::message::SharedGcode<'_>,

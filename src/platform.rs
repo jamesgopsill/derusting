@@ -3,8 +3,12 @@ use core::ffi::c_char;
 use crate::{log_info, lwip};
 
 // Extern "C" functions exposed by our glue layer - `libderusting.cpp`.
+//
+// SAFETY: the declarations must match the glue layer's definitions.
+// `derusting_ready_flag` is a single linker-provided atomic, so it is only
+// accessed through atomic operations.
 unsafe extern "C" {
-    /// Submit aline of gcode to Marlin.
+    /// Submit a line of gcode to Marlin.
     fn derusting_gcode_cmd(cmd: *const c_char) -> bool;
     /// Check if the printer is idle.
     fn derusting_is_idle() -> bool;
@@ -32,14 +36,20 @@ pub fn is_ready() -> bool {
     unsafe { derusting_ready_flag.load(core::sync::atomic::Ordering::SeqCst) }
 }
 
+/// The Prusa Buddy firmware implementation of the service's `Platform`
+/// trait, backed by the C++ glue layer.
 #[derive(Debug, Default)]
 pub struct Platform {}
 
 impl crate::service::Platform for Platform {
+    /// True when the technician has marked the printer ready and Marlin is idle.
     fn is_available(&self) -> bool {
         is_ready() && is_idle()
     }
 
+    /// Starts a print of `/usb/<guid>.gcode` if the printer is available.
+    /// Returns whether Marlin accepted the command; on success the ready
+    /// flag is cleared and the UI refreshed.
     fn manufacture(&self, guid: uuid::Uuid) -> bool {
         if self.is_available() {
             log_info!("Dry Print Initiated");
@@ -47,8 +57,9 @@ impl crate::service::Platform for Platform {
             // SAFETY: `c"M111 S8"` is a `'static` nul-terminated C string
             // literal, valid for the duration of the call.
             let _ = unsafe { derusting_gcode_cmd(c"M111 S8".as_ptr()) };
-            // SAFETY: `cmd` is a `heapless::CString` we just built above; its
-            // buffer is nul-terminated and remains valid for this call.
+            // SAFETY: `cmd` is a `heapless::String<64>` built above with an
+            // explicit trailing `\0`, so its buffer is nul-terminated and
+            // remains valid for this call.
             let res = unsafe { derusting_gcode_cmd(cmd.as_ptr()) };
             if res {
                 // SAFETY: see `is_ready` above for why referencing this static is sound.
@@ -63,10 +74,12 @@ impl crate::service::Platform for Platform {
         }
     }
 
+    /// Logs `args` through the firmware logger at `Info` severity.
     fn log(&self, args: core::fmt::Arguments) {
         log_info!("{}", args);
     }
 
+    /// The printer's local IPv4 address from lwIP, if it has one.
     fn local(&self) -> Option<core::net::Ipv4Addr> {
         lwip::local_ipv4()
     }

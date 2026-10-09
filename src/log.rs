@@ -16,6 +16,9 @@ pub enum Severity {
 
 // The `.cpp` hook exposes an extern "C" function to the
 // firmware logger so we can hook into it.
+//
+// SAFETY: the declaration must match `derusting_log_event` in the glue layer
+// (`libderusting.cpp`); `Severity` is `#[repr(i32)]` to match its C enum.
 unsafe extern "C" {
     /// Forwards a formatted, nul-terminated log message to the firmware's
     /// own logger at the given severity.
@@ -32,6 +35,8 @@ pub fn log(severity: Severity, args: core::fmt::Arguments) {
         // this call returns.
         unsafe { derusting_log_event(severity, msg.as_ptr() as *const _) };
     } else {
+        // SAFETY: `c"..."` is a `'static` nul-terminated C string literal, so
+        // the pointer is valid for the duration of the call.
         unsafe { derusting_log_event(severity, c"Message too long...".as_ptr() as *const _) };
     }
 }

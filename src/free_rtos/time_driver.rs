@@ -17,10 +17,10 @@ pub struct FreeRtosTimeDriver {
 }
 
 impl Driver for FreeRtosTimeDriver {
-    // Calculate now. FreeRTOS runs a u32 timer that could wrap after 49 days
-    // which could happen with a 3D printer. Embassy Time Driver works on a
-    // u64 so we keep track of the free_rts time, `wrap_sub` and add to our
-    // own timekeeper.
+    /// Calculate now. FreeRTOS runs a u32 timer that could wrap after 49 days
+    /// (at 1 kHz), which could happen with a 3D printer. Embassy Time Driver
+    /// works on a u64 so we keep track of the last FreeRTOS tick count, take
+    /// the `wrapping_sub` difference and add it to our own timekeeper.
     fn now(&self) -> u64 {
         critical_section::with(|cs| {
             // SAFETY: `xTaskGetTickCount` takes no arguments and is safe to
@@ -69,10 +69,10 @@ impl FreeRtosTimeDriver {
         // arguments and must be called from the task that will be
         // notified, which is this executor's own FreeRTOS task (see
         // `FreeRtosTaskExecutor::run`, the only caller of this function).
-        // Note: `diff_ticks` (a `u64`) is narrowed to `u32` here; when no
-        // timer is scheduled `exp_ticks` is very large (queue "no
-        // expiration" sentinel) and this cast can wrap, which may not wait
-        // as long as intended.
+        // Note: `diff_ticks` (a `u64`) is clamped to `u32::MAX` above, so the
+        // narrowing cast cannot wrap; when no timer is scheduled `exp_ticks`
+        // is very large (queue "no expiration" sentinel) and the wait is
+        // capped at `u32::MAX` ticks.
         unsafe { ulTaskGenericNotifyTake(0, 1, diff_ticks as u32) };
         let _ = self.next_expiration();
     }

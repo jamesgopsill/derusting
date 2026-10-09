@@ -18,7 +18,9 @@ pub struct FreeRtosTaskExecutor {
 }
 
 impl FreeRtosTaskExecutor {
-    /// Create a new instance of the Executor
+    /// Create a new instance of the Executor. `task` is the handle of the
+    /// FreeRTOS task the executor will run in; it is passed back to
+    /// `__pender` as the context used to wake that task.
     pub fn new(task: *mut BaseType_t) -> Self {
         Self {
             inner: raw::Executor::new(task as _),
@@ -46,6 +48,9 @@ impl FreeRtosTaskExecutor {
 
 /// The pender is the function that is used to wake the FreeRTOS
 /// task that the executor resides within.
+// SAFETY: Embassy's raw executor calls a symbol named `__pender` (the
+// `export_name`), so we export our function under that exact name; no other
+// item in the final binary may define it.
 #[unsafe(export_name = "__pender")]
 pub fn __pender(context: *mut c_void) {
     // Pender fires when a embassy-sync (Signal/Channel) gets fired.
@@ -74,7 +79,9 @@ pub fn __pender(context: *mut c_void) {
         // required calling context for `xTaskGenericNotifyFromISR`;
         // `task_handle` came from `__pender`'s caller as the executor's own
         // task handle, and `&mut higher_priority_task_woken` is a valid,
-        // writable local we own for the duration of the call.
+        // writable local we own for the duration of the call. The PendSV
+        // request inside the block is the Cortex-M port's usual
+        // yield-from-ISR mechanism.
         unsafe {
             xTaskGenericNotifyFromISR(
                 task_handle,

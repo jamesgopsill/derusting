@@ -26,39 +26,53 @@ const UDP_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, UDP_PORT
 const BROADCAST_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::BROADCAST, UDP_PORT);
 const TCP_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, TCP_PORT);
 
+/// Map of known peers to when we last heard from them (at most 32).
 type PeerMap = LinearMap<SocketAddrV4, Instant, 32>;
 
+/// The printer-specific services the derusting service depends on, kept
+/// separate so the service itself stays platform agnostic.
 pub trait Platform {
+    /// The machine's own IPv4 address, if it has one.
     fn local(&self) -> Option<Ipv4Addr>;
+    /// Whether the machine can start a new job right now (ready and idle).
     fn is_available(&self) -> bool;
+    /// Starts manufacturing the job `id`; returns whether it was started.
     fn manufacture(&self, id: Uuid) -> bool;
+    /// Writes a message to the platform's log.
     fn log(&self, args: core::fmt::Arguments);
 }
 
+/// A UDP socket used for peer-to-peer messaging.
 pub trait UdpSocket
 where
     Self: Sized,
 {
     type Error: core::error::Error;
 
+    /// Creates a new, unbound socket.
     fn new() -> Result<Self, Self::Error>;
 
+    /// Binds to `socket` and returns the address actually bound (which
+    /// differs from `socket` when port 0 is requested) along with the socket.
     fn bind(
         self,
         socket: SocketAddrV4,
     ) -> impl Future<Output = Result<(SocketAddrV4, Self), Self::Error>>;
 
+    /// Waits for a datagram, returning the sender and the filled part of `buf`.
     fn receive<'a>(
         &self,
         buf: &'a mut [u8],
     ) -> impl Future<Output = Result<(SocketAddrV4, &'a [u8]), Self::Error>>;
 
+    /// Sends `buf` to `remote`, returning the number of bytes sent.
     fn send(
         &self,
         remote: SocketAddrV4,
         buf: &[u8],
     ) -> impl Future<Output = Result<usize, Self::Error>>;
 
+    /// Calls `send` repeatedly until all of `buf` has been sent.
     #[allow(unused)]
     fn send_all(
         &self,
@@ -75,17 +89,25 @@ where
     }
 }
 
+/// A TCP connection to a peer or an HTTP client.
 pub trait TcpStream
 where
     Self: Sized,
 {
     type Error: core::error::Error;
+    /// Opens a connection to `remote`.
     #[allow(unused)]
     fn connect(remote: SocketAddrV4) -> impl Future<Output = Result<Self, Self::Error>>;
+    /// Reads available bytes into `buf` and returns the filled part. An empty
+    /// result means the peer closed the connection.
     fn read<'a>(&self, buf: &'a mut [u8]) -> impl Future<Output = Result<&'a [u8], Self::Error>>;
+    /// Writes some of `buf`, returning the number of bytes accepted (which may
+    /// be less than `buf.len()`).
     fn write(&self, buf: &[u8]) -> impl Future<Output = Result<usize, Self::Error>>;
+    /// Signals that we have finished sending (closes our write side).
     fn finish(&self) -> impl Future<Output = Result<(), Self::Error>>;
 
+    /// Calls `write` repeatedly until all of `buf` has been written.
     fn write_all(&self, mut buf: &[u8]) -> impl Future<Output = Result<(), Self::Error>> {
         async move {
             while !buf.is_empty() {
@@ -96,6 +118,7 @@ where
         }
     }
 
+    /// Replies with the `200 OK` "pong" response and finishes the stream.
     fn pong(&self) -> impl Future<Output = Result<(), Self::Error>> {
         async {
             self.write_all(PONG.as_bytes()).await?;
@@ -103,6 +126,7 @@ where
         }
     }
 
+    /// Replies with a `400 Bad Request` response and finishes the stream.
     fn bad_request(&self) -> impl Future<Output = Result<(), Self::Error>> {
         async {
             self.write_all(BAD_REQUEST.as_bytes()).await?;
@@ -110,6 +134,8 @@ where
         }
     }
 
+    /// Replies with a `500 Internal Server Error` response and finishes the
+    /// stream.
     fn internal_server_error(&self) -> impl Future<Output = Result<(), Self::Error>> {
         async {
             self.write_all(INTERNAL_SERVER_ERROR.as_bytes()).await?;
@@ -118,38 +144,52 @@ where
     }
 }
 
+/// A TCP listener that accepts incoming connections.
 pub trait TcpListener
 where
     Self: Sized,
 {
     type TcpStream: TcpStream;
     type Error: core::error::Error;
+    /// Creates a new, unbound listener.
     fn new() -> Result<Self, Self::Error>;
+    /// Binds to `socket`, starts listening and returns the address actually
+    /// bound along with the listener.
     fn bind(
         self,
         socket: SocketAddrV4,
     ) -> impl Future<Output = Result<(SocketAddrV4, Self), Self::Error>>;
+    /// Waits for the next incoming connection.
     fn accept(&self) -> impl Future<Output = Result<Self::TcpStream, Self::Error>>;
 }
 
+/// How a file is opened by `Vfs::open`.
 pub enum VfsFlag {
     Read,
     Write,
 }
 
+/// A minimal virtual file system (the USB stick on the printer). Reading and
+/// writing come from the `embedded_io` supertraits.
 pub trait Vfs
 where
     Self: Sized + embedded_io::Write + embedded_io::Read + embedded_io::ErrorType,
 {
+    /// Opens the file at `path` for reading or writing, per `flag`.
     fn open(path: &str, flag: VfsFlag) -> impl Future<Output = Result<Self, Self::Error>>;
+    /// Deletes the file at `path`.
     fn delete(path: &str) -> impl Future<Output = Result<(), Self::Error>>;
+    /// Renames the file `src` to `dest`.
     fn rename(src: &str, dest: &str) -> impl Future<Output = Result<(), Self::Error>>;
+    /// Closes the file by consuming it (dropping it releases the handle).
     fn close(self) {}
+    /// Whether `path` can be opened for reading.
     fn exists(path: &str) -> impl Future<Output = bool> {
         async { Self::open(path, VfsFlag::Read).await.is_ok() }
     }
 }
 
+/// Errors from creating a `Service`, from either the UDP or TCP side.
 pub enum ServiceError<U, T>
 where
     U: UdpSocket,
@@ -159,6 +199,9 @@ where
     Tcp(T::Error),
 }
 
+/// The derusting service: shares a ledger of jobs between machines over UDP
+/// (a token ring), accepts gcode uploads over TCP and starts jobs on the
+/// local platform when it owns the ledger and is available.
 pub struct Service<U, T, P, V>
 where
     U: UdpSocket,
@@ -182,6 +225,8 @@ where
     P: Platform,
     V: Vfs,
 {
+    /// Creates the UDP and TCP sockets, binds them to `UDP_ADDR` and
+    /// `TCP_ADDR`, and returns a service with an empty ledger and no peers.
     pub async fn new(platform: P) -> Result<Self, ServiceError<U, T>> {
         let udp = match U::new() {
             Ok(udp) => udp,
@@ -214,6 +259,9 @@ where
         })
     }
 
+    /// Runs all of the service's tasks (heartbeat, UDP receive, ledger, TCP
+    /// accept, peer expiry and gcode broadcast) concurrently. These loop
+    /// forever, so this only returns if the tasks are dropped.
     pub async fn run(&mut self) {
         let args = format_args!("Running derusting on {:?}", self.platform.local());
         self.platform.log(args);
@@ -228,6 +276,8 @@ where
         let _ = fut.await;
     }
 
+    /// Broadcasts a heartbeat over UDP every 2 seconds so peers know we are
+    /// alive.
     async fn heartbeat(&self) -> ! {
         let mut ticker = Ticker::every(Duration::from_secs(2));
         loop {
@@ -239,6 +289,9 @@ where
         }
     }
 
+    /// Receives UDP messages forever: records the sender in the address book
+    /// and handles each payload (new jobs, shared ledgers and gcode chunks of
+    /// a file transfer; heartbeats and logs need no further action).
     async fn udp_receive_handler(&self) -> ! {
         static BUF: ConstStaticCell<[u8; 1024]> = ConstStaticCell::new([0u8; 1024]);
         let buf = BUF.take();
@@ -259,7 +312,7 @@ where
             match msg.payload {
                 message::Payload::Heartbeat(_) => {
                     // No need to do anything as we have updated
-                    // the address book as we do we all other
+                    // the address book as we do for all other
                     // messages.
                 }
                 message::Payload::NewJob(job) => {
@@ -303,6 +356,7 @@ where
         }
     }
 
+    /// Every 10 seconds, drops peers we have not heard from in 20 seconds.
     pub async fn manage_peers(&self) -> ! {
         loop {
             Timer::after_secs(10).await;
@@ -311,6 +365,10 @@ where
         }
     }
 
+    /// Drives the token-ring ledger every 5 seconds (after an initial 15
+    /// second wait): takes ownership if the ledger has gone quiet, and when we
+    /// own it starts a job if the platform is available, then passes the ledger
+    /// to a random peer (or keeps it if we are alone).
     async fn manage_ledger(&self) -> ! {
         // Before we start. Lets give any other machines
         // on the network a chance to send us any ledger
@@ -320,7 +378,7 @@ where
         loop {
             ticker.next().await;
 
-            // Only run if we an ip address
+            // Only run if we have an ip address
             let Some(local) = self.platform.local() else {
                 continue;
             };
@@ -398,6 +456,10 @@ where
         }
     }
 
+    /// Serves HTTP over TCP, one connection at a time. `GET /` returns the
+    /// web page; `PUT /` with a gcode body saves the upload to the USB stick
+    /// (as `.partial`, renamed to `.gcode` once complete), announces the new job
+    /// to peers, adds it to the ledger and queues it for UDP broadcast.
     async fn tcp_accept(&self) -> ! {
         let mut buf = [0u8; 1024]; // Keep it out of the stack frame
         loop {
@@ -562,13 +624,15 @@ where
         }
     }
 
+    /// Waits for uploaded files to be queued on the channel, then broadcasts
+    /// each one over UDP in 768-byte chunks, 500 ms apart.
     async fn broadcast_gcode(&self) -> ! {
         loop {
             let guid = self.channel.receive().await;
             let path = heapless::format!(64; "/usb/{}.gcode", guid).unwrap();
 
             // Tcp complete now share the file around UDP but
-            // note this should be move out of this separate task
+            // note this should be moved out of this separate task
             // as it currently prevents new tcp streams.
             let Ok(mut fil) = V::open(&path, VfsFlag::Read).await else {
                 continue;
@@ -600,6 +664,7 @@ where
     }
 }
 
+/// The HTTP methods the TCP server handles.
 enum Method {
     Get,
     Put,

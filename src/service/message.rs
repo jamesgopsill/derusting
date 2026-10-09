@@ -25,6 +25,7 @@ pub(crate) struct OwnedLedger {
 }
 
 impl OwnedLedger {
+    /// Creates an empty ledger owned by `owner`, stamped as updated now.
     pub fn new(owner: Ipv4Addr) -> Self {
         Self {
             owner,
@@ -33,10 +34,12 @@ impl OwnedLedger {
         }
     }
 
+    /// The pending jobs, in FIFO order.
     pub fn jobs(&self) -> &[Uuid] {
         &self.jobs
     }
 
+    /// Whether `id` is in the ledger.
     pub fn contains(&self, id: &Uuid) -> bool {
         self.jobs.contains(id)
     }
@@ -60,6 +63,8 @@ impl OwnedLedger {
         }
     }
 
+    /// Returns the first job in the ledger whose `/usb/<guid>.gcode` file
+    /// exists on `V`, or `None` if none do.
     pub async fn pick_one<V>(&self) -> Option<Uuid>
     where
         V: Vfs,
@@ -73,7 +78,7 @@ impl OwnedLedger {
         None
     }
 
-    // Borrow as the wire form, e.g. to pass the token on to `next`.
+    /// Borrow as the wire form, e.g. to pass the token on to the next machine.
     pub fn share(&self) -> SharedLedger<'_> {
         SharedLedger {
             owner: self.owner,
@@ -82,6 +87,8 @@ impl OwnedLedger {
     }
 }
 
+/// Borrowed wire form of `OwnedLedger`, deserialised straight out of the
+/// packet buffer.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SharedLedger<'a> {
     pub owner: Ipv4Addr,
@@ -101,6 +108,8 @@ impl From<SharedLedger<'_>> for OwnedLedger {
     }
 }
 
+/// One chunk of a gcode file held in a fixed buffer; `len` bytes of `data`
+/// are valid.
 #[derive(Debug)]
 pub struct OwnedGcode {
     pub guid: Uuid,
@@ -111,6 +120,7 @@ pub struct OwnedGcode {
 }
 
 impl OwnedGcode {
+    /// Borrow as the wire form, covering only the valid `data[..len]` bytes.
     pub fn share(&self) -> SharedGcode<'_> {
         SharedGcode {
             guid: self.guid,
@@ -121,6 +131,8 @@ impl OwnedGcode {
     }
 }
 
+/// Borrowed wire form of a gcode chunk: part `chunk_id` of the file `guid`,
+/// with `last_chunk` set on the final one.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SharedGcode<'a> {
     pub guid: Uuid,
@@ -150,6 +162,8 @@ pub struct Message<'a> {
     pub payload: Payload<'a>,
 }
 
+/// Sends and receives `Message`s over a UDP socket, dropping duplicates using
+/// a history of the last 16 idempotency keys.
 pub struct MessageManager<U>
 where
     U: UdpSocket,
@@ -162,6 +176,7 @@ impl<U> MessageManager<U>
 where
     U: UdpSocket,
 {
+    /// Wraps `udp` with an empty duplicate-detection history.
     pub fn new(udp: U) -> Self {
         Self {
             udp,
@@ -169,6 +184,9 @@ where
         }
     }
 
+    /// Receives one datagram into `buf` and decodes it. Returns `None` if the
+    /// receive or decode fails, or if the message is a duplicate (its
+    /// idempotency key was seen recently).
     pub async fn receive<'a>(&self, buf: &'a mut [u8]) -> Option<(SocketAddrV4, Message<'a>)> {
         // TODO. better logging
         let mut history = self.history.borrow_mut();
@@ -188,6 +206,8 @@ where
         Some((remote, msg))
     }
 
+    /// Broadcasts a heartbeat message. A message that fails to encode is
+    /// silently skipped.
     pub async fn send_heartbeat(&self) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
         let msg = Message {
@@ -200,6 +220,8 @@ where
         Ok(())
     }
 
+    /// Broadcasts the ledger (passing the token on). A message that fails to
+    /// encode is silently skipped.
     pub async fn send_share(&self, share: SharedLedger<'_>) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
         let msg = Message {
@@ -212,6 +234,9 @@ where
         Ok(())
     }
 
+    /// Broadcasts a gcode chunk twice, 50-150 ms apart, to make loss of the
+    /// UDP packet less likely (the receiver drops the duplicate). A message
+    /// that fails to encode is silently skipped.
     pub async fn send_gcode(&self, gcode: SharedGcode<'_>) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
         let msg = Message {
@@ -228,6 +253,8 @@ where
         Ok(())
     }
 
+    /// Broadcasts that a new job `guid` has been uploaded. A message that
+    /// fails to encode is silently skipped.
     pub async fn send_new_job(&self, guid: Uuid) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
         let msg = Message {
@@ -240,6 +267,8 @@ where
         Ok(())
     }
 
+    /// Broadcasts a log line (formatted into at most 128 bytes) for the demo
+    /// logging tool. A message that fails to encode is silently skipped.
     pub async fn send_log(&self, fargs: core::fmt::Arguments<'_>) -> Result<(), U::Error> {
         // TODO. fix this
         let msg = heapless::format!(128; "{}", fargs).unwrap();
@@ -262,10 +291,15 @@ mod uuid_slice {
     use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
     use uuid::Uuid;
 
+    /// Serialises the jobs as one byte string by reinterpreting the `Uuid`s
+    /// as bytes.
     pub fn serialize<S: Serializer>(jobs: &[Uuid], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_bytes(bytemuck::cast_slice(jobs))
     }
 
+    /// Borrows the byte string as a slice of `Uuid`s without copying. Fails if
+    /// its length is not a multiple of 16 bytes or it holds more than
+    /// `MAX_JOBS` jobs.
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<&'de [Uuid], D::Error> {
         let bytes: &'de [u8] = Deserialize::deserialize(d)?;
         let jobs: &'de [Uuid] = bytemuck::try_cast_slice(bytes)

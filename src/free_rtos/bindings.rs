@@ -4,16 +4,21 @@ use core::{
     marker::{PhantomData, PhantomPinned},
 };
 
+/// FreeRTOS's `BaseType_t` (a signed 32-bit integer on this port).
 pub type BaseType_t = i32;
 /// Opaque pointer type for the argument passed to a task's entry function.
 pub type pvParameters = c_void;
 /// The entry-point signature FreeRTOS expects for a task function.
+/// Task functions must never return, and are only valid to call from the
+/// FreeRTOS task they were created for.
 pub type TaskFunction_t = unsafe extern "C" fn(*mut pvParameters) -> !;
+/// Opaque FreeRTOS task control block; only ever used behind a pointer.
 #[repr(C)]
 pub struct tskTaskControlBlock {
     _data: [u8; 0],
     _marker: PhantomData<(*mut u8, PhantomPinned)>,
 }
+/// Handle to a FreeRTOS task (pointer to its control block).
 pub type TaskHandle_t = *mut tskTaskControlBlock;
 
 /// Error codes returned by our FreeRTOS task-creation bindings.
@@ -21,6 +26,7 @@ pub type TaskHandle_t = *mut tskTaskControlBlock;
 pub struct Error(i32);
 
 impl core::fmt::Display for Error {
+    /// Formats the error using its `Debug` representation (the raw code).
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{self:?}")
     }
@@ -29,16 +35,19 @@ impl core::fmt::Display for Error {
 impl core::error::Error for Error {}
 
 impl Error {
+    /// Wraps a raw FreeRTOS return code.
     pub fn new(code: i32) -> Self {
         Self(code)
     }
 
+    /// Converts a FreeRTOS return code into a `Result`: `1` (`pdPASS`) is
+    /// `Ok`, anything else is an `Error` carrying that code.
     pub fn check(rc: i32) -> Result<(), Self> {
         if (rc == 1) { Ok(()) } else { Err(Self(rc)) }
     }
 }
 
-// SAFETY (whole block): these are raw FreeRTOS kernel entry points. Unless
+// SAFETY: (applies to the whole block) these are raw FreeRTOS kernel entry points. Unless
 // individually noted otherwise, all task-handle arguments must either be
 // null (meaning "the calling task", where the API supports it) or a handle
 // obtained from FreeRTOS itself (e.g. `xTaskGetCurrentTaskHandle`) and not
@@ -47,7 +56,7 @@ impl Error {
 // per-function below.
 unsafe extern "C" {
     /// Delete a FreeRTOS task.
-    pub fn vTaskDelete(task: *mut i32);
+    pub fn vTaskDelete(task: TaskHandle_t);
 
     /// Notify a task to make progress outside of an interrupt.
     pub fn xTaskGenericNotify(
@@ -81,6 +90,8 @@ unsafe extern "C" {
     /// Get a pointer to the current task.
     pub fn xTaskGetCurrentTaskHandle() -> TaskHandle_t;
 
+    /// Create a FreeRTOS task using caller-provided stack and TCB storage.
+    ///
     /// `stack_buf_ptr` must point to a buffer of at least
     /// `us_stack_depth * 4` bytes, and `tcb_buf_ptr` to a buffer sized for
     /// FreeRTOS's internal TCB struct (128 bytes is assumed by callers in
@@ -123,9 +134,11 @@ unsafe extern "C" {
     /// Exit a critical section.
     pub fn vPortExitCritical();
 
-    // Free heap size.
+    /// Free heap size.
     pub fn xPortGetFreeHeapSize() -> usize;
 
-    // Stack size
+    /// Minimum free stack space (in words) that has remained for the task
+    /// since it started; `xTask` must be a valid handle (or null for the
+    /// calling task).
     pub fn uxTaskGetStackHighWaterMark(xTask: TaskHandle_t) -> usize;
 }
