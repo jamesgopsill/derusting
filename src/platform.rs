@@ -2,7 +2,7 @@ use core::ffi::c_char;
 
 use heapless::CString;
 
-use crate::log_info;
+use crate::{log_info, lwip};
 
 // Extern "C" functions exposed by our glue layer - `libderusting.cpp`.
 unsafe extern "C" {
@@ -57,7 +57,11 @@ impl crate::service::Platform for Platform {
         }
     }
 
-    fn log(&self, msg: &str) {
-        log_info!("{msg}");
+    fn log(&self, args: core::fmt::Arguments) {
+        log_info!("{}", args);
+    }
+
+    fn local(&self) -> Option<core::net::Ipv4Addr> {
+        lwip::local_ipv4()
     }
 }

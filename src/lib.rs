@@ -58,7 +58,7 @@ static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
 /// We only need a small stack to hold the executor. The
 /// embassy task macro provides the stack memory required
 /// for each embassy task
-const STACK_BYTES: usize = 1024 * 4; // / 4 for u32 stack words
+const STACK_BYTES: usize = 1024 * 6; // / 4 for u32 stack words
 // #[unsafe(link_section = ".ccmram")]
 static mut RTOS_STACK: [u8; STACK_BYTES] = [0u8; STACK_BYTES];
 // #[unsafe(link_section = ".ccmram")]
@@ -123,7 +123,7 @@ unsafe extern "C" fn embassy(_pv_parameters: *mut pvParameters) -> ! {
 /// The main Embassy task: brings up UDP/TCP, waits for an IP address, then
 /// spawns the heartbeat, address-book, ledger and TCP worker tasks.
 #[embassy_executor::task(pool_size = 1)]
-async fn embassy_main(_spawner: Spawner) {
+async fn embassy_main(spawner: Spawner) {
     log_info!("Embassy Main");
 
     let empty = Ipv4Addr::new(0, 0, 0, 0);

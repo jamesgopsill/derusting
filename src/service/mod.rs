@@ -1,8 +1,8 @@
 #![no_std]
-#![allow(unused)]
 
 use core::{
     convert::Infallible,
+    fmt::Arguments,
     iter::Chain,
     marker::PhantomData,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
@@ -10,11 +10,8 @@ use core::{
     time,
 };
 
-use embassy_sync::{blocking_mutex::raw::NoopRawMutex, zerocopy_channel::Receiver};
-use embassy_sync::{
-    mutex::Mutex,
-    zerocopy_channel::{Channel, Sender},
-};
+use embassy_executor::Spawner;
+use embassy_sync::{blocking_mutex::raw::NoopRawMutex, channel::Channel, mutex::Mutex};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use heapless::{
     HistoryBuf, LinearMap, Vec, format, index_map::Entry::Occupied, index_set::FnvIndexSet,
@@ -27,7 +24,10 @@ use message::{Message, OwnedLedger, Payload::Heartbeat};
 
 use crate::{
     lwip,
-    service::{message::OwnedGcode, transfer::FileTransfer},
+    service::{
+        message::{MessageManager, OwnedGcode},
+        transfer::FileTransfer,
+    },
 };
 
 mod message;
@@ -38,14 +38,14 @@ const TCP_PORT: u16 = 8080;
 const UDP_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, UDP_PORT);
 const BROADCAST_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::BROADCAST, UDP_PORT);
 const TCP_ADDR: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, TCP_PORT);
-const IDEMPOTENCY_HISTORY: usize = 64;
 
 type PeerMap = LinearMap<SocketAddrV4, Instant, 32>;
 
 pub trait Platform {
+    fn local(&self) -> Option<Ipv4Addr>;
     fn is_available(&self) -> bool;
     fn manufacture(&self, id: Uuid) -> bool;
-    fn log(&self, msg: &str);
+    fn log(&self, args: core::fmt::Arguments);
 }
 
 pub trait UdpSocket
@@ -120,11 +120,10 @@ pub enum VfsFlag {
     Write,
 }
 
-pub trait Vfs: embedded_io::ErrorType
+pub trait Vfs
 where
-    Self: Sized + embedded_io::Write + embedded_io::Read,
+    Self: Sized + embedded_io::Write + embedded_io::Read + embedded_io::ErrorType,
 {
-    // Option. add rw flags.
     fn open(path: &str, flag: VfsFlag) -> impl Future<Output = Result<Self, Self::Error>>;
     fn delete(path: &str) -> impl Future<Output = Result<(), Self::Error>>;
     fn rename(src: &str, dest: &str) -> impl Future<Output = Result<(), Self::Error>>;
@@ -143,7 +142,6 @@ where
     Tcp(T::Error),
 }
 
-#[derive(Debug)]
 pub struct Service<U, T, P, V>
 where
     U: UdpSocket,
@@ -151,13 +149,13 @@ where
     P: Platform,
     V: Vfs,
 {
-    local: SocketAddrV4,
-    udp: U,
+    messenger: MessageManager<U>,
     tcp: T,
     platform: P,
     ledger: Mutex<NoopRawMutex, OwnedLedger>,
     peers: Mutex<NoopRawMutex, PeerMap>,
     vfs: PhantomData<V>,
+    channel: Channel<NoopRawMutex, Uuid, 8>,
 }
 
 impl<U, T, P, V> Service<U, T, P, V>
@@ -176,40 +174,45 @@ where
             Ok(tcp) => tcp,
             Err(err) => return Err(ServiceError::Tcp(err)),
         };
-        let (local, udp) = match udp.bind(UDP_ADDR).await {
-            Ok((local, udp)) => (local, udp),
+        let udp = match udp.bind(UDP_ADDR).await {
+            Ok((_, udp)) => udp,
             Err(err) => return Err(ServiceError::Udp(err)),
         };
         let tcp = match tcp.bind(TCP_ADDR).await {
             Ok((_, tcp)) => tcp,
             Err(err) => return Err(ServiceError::Tcp(err)),
         };
-        let local_ip = lwip::local_ipv4().unwrap();
-        let msg = heapless::format!(64; "Serving UDP on {}", local_ip).unwrap();
-        let _ = Message::send_log(&msg, &udp).await;
-        let local = SocketAddrV4::new(local_ip, 9090);
         let peers: Mutex<NoopRawMutex, PeerMap> = Mutex::new(LinearMap::new());
-        let ledger: Mutex<NoopRawMutex, OwnedLedger> = Mutex::new(OwnedLedger::new(local));
+        let ledger: Mutex<NoopRawMutex, OwnedLedger> =
+            Mutex::new(OwnedLedger::new(Ipv4Addr::UNSPECIFIED));
+        let channel: Channel<NoopRawMutex, Uuid, 8> = Channel::new();
         Ok(Self {
-            local,
-            udp,
+            messenger: MessageManager::new(udp),
             tcp,
             platform,
             ledger,
             peers,
             vfs: PhantomData,
+            channel,
         })
     }
 
-    pub async fn run(&mut self) -> () {
-        let s = heapless::format!(64; "Running derusting on {}", self.local).unwrap();
-        self.platform.log(&s);
+    pub async fn run(&mut self) {
+        let args = format_args!("Running derusting on {:?}", self.platform.local());
+        self.platform.log(args);
+        static CHANNEL: ConstStaticCell<Channel<NoopRawMutex, Uuid, 8>> =
+            ConstStaticCell::new(Channel::new());
+        let channel = CHANNEL.take();
+        let sender = channel.sender();
+        let receiver = channel.receiver();
         let fut_01 = self.heartbeat();
         let fut_02 = self.udp_receive_handler();
         let fut_03 = self.manage_ledger();
         let fut_04 = self.tcp_accept();
         let fut_05 = self.manage_peers();
+        let fut_06 = self.broadcast_gcode();
         let fut = embassy_futures::join::join5(fut_01, fut_02, fut_03, fut_04, fut_05);
+        let fut = embassy_futures::join::join(fut, fut_06);
         let _ = fut.await;
     }
 
@@ -217,9 +220,9 @@ where
         let mut ticker = Ticker::every(Duration::from_secs(2));
         loop {
             ticker.next().await;
-            match Message::send_heartbeat(&self.udp).await {
-                Ok(_) => self.platform.log("HB Sent"),
-                Err(_) => self.platform.log("HB Error"),
+            match self.messenger.send_heartbeat().await {
+                Ok(_) => self.platform.log(format_args!("HB Sent")),
+                Err(_) => self.platform.log(format_args!("HB Error")),
             }
         }
     }
@@ -227,25 +230,12 @@ where
     async fn udp_receive_handler(&self) -> ! {
         static BUF: ConstStaticCell<[u8; 1024]> = ConstStaticCell::new([0u8; 1024]);
         let buf = BUF.take();
-        let mut history: HistoryBuf<Uuid, 32> = HistoryBuf::new();
         let mut transfer: Option<FileTransfer<V>> = None;
         loop {
-            let Ok((remote, packet)) = self.udp.receive(buf.as_mut()).await else {
-                self.platform.log("Packet Receive Error");
+            let Some((remote, msg)) = self.messenger.receive(buf.as_mut()).await else {
+                self.platform.log(format_args!("Packet Receive Error"));
                 continue;
             };
-
-            let Ok(msg) = postcard::from_bytes::<Message>(packet) else {
-                self.platform.log("Packet Parse Error");
-                continue;
-            };
-
-            if history.contains(&msg.idempotency) {
-                // Already processed it recently
-                continue;
-            }
-
-            history.write(msg.idempotency);
 
             // Update address book.
             {
@@ -276,7 +266,9 @@ where
                         && transfer.is_none()
                         && let Ok(t) = FileTransfer::<V>::new(&gcode).await
                     {
-                        let _ = Message::send_log("Transfer Recv Start", &self.udp).await;
+                        let fargs =
+                            format_args!("Transfer Recv Start: {}", self.platform.local().unwrap());
+                        let _ = self.messenger.send_log(fargs).await;
                         transfer = Some(t);
                         continue;
                     }
@@ -285,7 +277,11 @@ where
                     {
                         transfer = t2;
                         if transfer.is_none() {
-                            let _ = Message::send_log("Transfer Recv Stop", &self.udp).await;
+                            let fargs = format_args!(
+                                "Transfer Recv Finished: {}",
+                                self.platform.local().unwrap()
+                            );
+                            let _ = self.messenger.send_log(fargs).await;
                         }
                     }
                 }
@@ -293,7 +289,7 @@ where
         }
     }
 
-    pub async fn manage_peers(&self) {
+    pub async fn manage_peers(&self) -> ! {
         loop {
             Timer::after_secs(10).await;
             let mut peers = self.peers.lock().await;
@@ -301,7 +297,7 @@ where
         }
     }
 
-    async fn manage_ledger(&self) {
+    async fn manage_ledger(&self) -> ! {
         // Before we start. Lets give any other machines
         // on the network a chance to send us any ledger
         // in circulation.
@@ -310,26 +306,34 @@ where
         loop {
             ticker.next().await;
 
+            // Only run if we an ip address
+            let Some(local) = self.platform.local() else {
+                continue;
+            };
+            if local.is_unspecified() {
+                continue;
+            }
+
+            // Get the ledger
             let mut ledger = self.ledger.lock().await;
-            let msg =
-                format!(64; "(manage_ledger) Ledger has {} job(s).", ledger.jobs().len()).unwrap();
-            self.platform.log(msg.as_str());
+            let fargs = format_args!("(manage_ledger) Ledger has {} job(s).", ledger.jobs().len());
+            self.platform.log(fargs);
 
             // If I don't own the ledger then all I will do
             // is check whether I have not seen it change
             // ownership in a while.
-            if (ledger.owner != self.local) {
-                // It is not me
-                if (ledger.updated.elapsed() > Duration::from_secs(20)) {
-                    let msg = heapless::format!(64; "{} taking over", self.local).unwrap();
-                    self.platform.log(&msg);
-                    let _ = Message::send_log(&msg, &self.udp).await;
+            if (ledger.owner != local) {
+                // It is not me. Lets check if it is an empty ip address.
+                if (ledger.updated.elapsed() > Duration::from_secs(20)
+                    || ledger.owner.is_unspecified())
+                {
+                    let fargs = format_args!("Taking ownership.");
+                    self.platform.log(fargs);
                     // It is not me but I haven't seen a more recent one being passed about.
                     // I will take it upon myself to start the process again.
-                    ledger.owner = self.local;
+                    ledger.owner = local;
                     let share = ledger.share();
-                    // TODO: handle failed send
-                    let _ = Message::send_share(share, &self.udp).await;
+                    let _ = self.messenger.send_share(share).await;
                 }
                 continue;
             }
@@ -337,8 +341,8 @@ where
             // I own the ledger
             if self.platform.is_available() {
                 let guid = ledger.pick_one::<V>().await;
-                let msg = format!(64; "pick_one {guid:?}").unwrap();
-                self.platform.log(msg.as_str());
+                let msg = format_args!("pick_one {guid:?}");
+                self.platform.log(msg);
 
                 if let Some(guid) = guid
                     && self.platform.manufacture(guid)
@@ -351,8 +355,12 @@ where
             let peers = self.peers.lock().await;
             if peers.is_empty() {
                 // I am the only one here so keep the ledger.
-                self.platform.log("It's only me. Keeping ledger.");
+                self.platform
+                    .log(format_args!("It's only me. Keeping ledger."));
                 ledger.updated = Instant::now();
+                // And I might as well tell everyone.
+                let share = ledger.share();
+                let _ = self.messenger.send_share(share).await;
                 continue;
             }
 
@@ -361,12 +369,15 @@ where
             let idx = rng.random_range(0..peers.len());
             match peers.iter().nth(idx) {
                 Some(peer) => {
-                    ledger.owner = *peer.0;
+                    ledger.owner = *peer.0.ip();
                     let share = ledger.share();
-                    let _ = Message::send_share(share, &self.udp).await;
+                    let _ = self.messenger.send_share(share).await;
                 }
                 None => {
                     ledger.updated = Instant::now();
+                    // Ok, I will keep it
+                    let share = ledger.share();
+                    let _ = self.messenger.send_share(share).await;
                     continue;
                 }
             }
@@ -378,13 +389,13 @@ where
         loop {
             // Accept a new connection
             let Ok(stream) = self.tcp.accept().await else {
-                self.platform.log("TCP accept err.");
+                self.platform.log(format_args!("TCP accept err."));
                 continue;
             };
 
             // Get the first batch of data
             let Ok(data) = stream.read(&mut buf).await else {
-                self.platform.log("TCP stream read err");
+                self.platform.log(format_args!("TCP stream read err"));
                 let _ = stream.internal_server_error().await;
                 continue;
             };
@@ -392,7 +403,7 @@ where
             // Does it contain the necessary headers
             let Some((start_line, headers, body)) = split_request(data) else {
                 if stream.bad_request().await.is_err() {
-                    self.platform.log("TCP stream write err");
+                    self.platform.log(format_args!("TCP stream write err"));
                 };
                 continue;
             };
@@ -402,7 +413,7 @@ where
                 Ok(method) => method,
                 Err(e) => {
                     if stream.write(e.as_bytes()).await.is_err() {
-                        self.platform.log("TCP stream write err");
+                        self.platform.log(format_args!("TCP stream write err"));
                     };
                     continue;
                 }
@@ -411,18 +422,18 @@ where
             // Check the method.
             match method {
                 Method::Get => {
-                    self.platform.log("/ GET");
+                    self.platform.log(format_args!("/ GET"));
                     if stream.write(INDEX_HTML.as_bytes()).await.is_err() {
-                        self.platform.log("TCP stream write err");
+                        self.platform.log(format_args!("TCP stream write err"));
                     };
                     if stream.finish().await.is_err() {
-                        self.platform.log("TCP stream finish err");
+                        self.platform.log(format_args!("TCP stream finish err"));
                         continue;
                     }
                     continue;
                 }
                 Method::Put => {
-                    self.platform.log("/ PUT");
+                    self.platform.log(format_args!("/ PUT"));
 
                     let info = check_put_header(headers);
                     if !info.is_gcode
@@ -430,21 +441,22 @@ where
                         || info.size.is_some_and(|s| s == 0 || s > 1_000_000)
                     {
                         if stream.bad_request().await.is_err() {
-                            self.platform.log("TCP stream write err");
+                            self.platform.log(format_args!("TCP stream write err"));
                         };
                         continue;
                     }
 
                     let guid = match info.guid {
                         Some(guid) => {
-                            self.platform.log("Receiving file from machine");
+                            self.platform
+                                .log(format_args!("Receiving file from machine"));
                             guid
                         }
                         None => Uuid::new_v4(),
                     };
                     let partial_path = heapless::format!(64; "/usb/{}.partial", guid).unwrap();
                     let Ok(mut fil) = V::open(partial_path.as_str(), VfsFlag::Write).await else {
-                        self.platform.log("File open error");
+                        self.platform.log(format_args!("File open error"));
                         let _ = stream.internal_server_error().await;
                         continue;
                     };
@@ -460,7 +472,7 @@ where
                     let mut more_data_needed = true;
                     loop {
                         let Ok(data) = stream.read(&mut buf).await else {
-                            self.platform.log("TCP stream read err");
+                            self.platform.log(format_args!("TCP stream read err"));
                             let _ = stream.internal_server_error().await;
                             continue;
                         };
@@ -482,7 +494,7 @@ where
                         fil.close();
                         let _ = V::delete(&partial_path).await;
                         if stream.bad_request().await.is_err() {
-                            self.platform.log("TCP stream write err");
+                            self.platform.log(format_args!("TCP stream write err"));
                         };
                         continue;
                     }
@@ -498,12 +510,12 @@ where
                         .is_err()
                     {
                         if stream.internal_server_error().await.is_err() {
-                            self.platform.log("TCP stream write err");
+                            self.platform.log(format_args!("TCP stream write err"));
                         };
                         continue;
                     };
 
-                    let msg = Message::send_new_job(guid, &self.udp).await;
+                    let _ = self.messenger.send_new_job(guid).await;
 
                     // Add it to our ledger. Does it matter if we own
                     // it or not so we stay up to date.
@@ -511,39 +523,50 @@ where
                     ledger.insert(guid);
 
                     if stream.pong().await.is_err() {
-                        self.platform.log("TCP stream write err");
+                        self.platform.log(format_args!("TCP stream write err"));
                     };
 
-                    // Tcp complete now share the file around UDP but
-                    // note this should be move out of this separate task
-                    // as it currently prevents new tcp streams.
-                    let Ok(mut fil) = V::open(&final_path, VfsFlag::Read).await else {
-                        continue;
-                    };
-                    let mut chunk = OwnedGcode {
-                        guid,
-                        chunk_id: 0,
-                        last_chunk: false,
-                        data: [0u8; 768],
-                    };
-                    loop {
-                        let Ok(res) = fil.read(&mut chunk.data) else {
-                            self.platform.log("Read error");
-                            break;
-                        };
-                        if res < chunk.data.len() {
-                            // EOF
-                            chunk.last_chunk = true;
-                            let _ = Message::send_gcode(chunk.share(), &self.udp).await;
-                            break;
-                        }
-                        let _ = Message::send_gcode(chunk.share(), &self.udp).await;
-                        chunk.chunk_id += 1;
-                        Timer::after_millis(500).await
-                    }
+                    // Could end up blocking if too many
+                    // files are uploaded too quickly.
+                    self.channel.send(guid).await;
 
                     continue;
                 }
+            }
+        }
+    }
+
+    async fn broadcast_gcode(&self) -> ! {
+        loop {
+            let guid = self.channel.receive().await;
+            let path = heapless::format!(64; "/usb/{}.gcode", guid).unwrap();
+
+            // Tcp complete now share the file around UDP but
+            // note this should be move out of this separate task
+            // as it currently prevents new tcp streams.
+            let Ok(mut fil) = V::open(&path, VfsFlag::Read).await else {
+                continue;
+            };
+            let mut chunk = OwnedGcode {
+                guid,
+                chunk_id: 0,
+                last_chunk: false,
+                data: [0u8; 768],
+            };
+            loop {
+                let Ok(res) = fil.read(&mut chunk.data) else {
+                    self.platform.log(format_args!("Read error"));
+                    break;
+                };
+                if res < chunk.data.len() {
+                    // EOF
+                    chunk.last_chunk = true;
+                    let _ = self.messenger.send_gcode(chunk.share()).await;
+                    break;
+                }
+                let _ = self.messenger.send_gcode(chunk.share()).await;
+                chunk.chunk_id += 1;
+                Timer::after_millis(500).await
             }
         }
     }
@@ -607,12 +630,6 @@ pub struct PutInfo {
 
 /// Analyses the PUT header to ensure it features the information
 /// we require to process the request.
-//
-// Checked 2026-09-21: browser fetch() does in fact send `Content-Type:
-// text/x.gcode` for the bundled upload form despite no explicit header in
-// assets/index.html's JS, so `is_gcode` below is not the issue - false
-// alarm, not the cause of the NS_ERROR_NET_RESET failures (see the BUG
-// note on `TcpConnection::Drop` in src/lwip/tcp.rs for that).
 fn check_put_header(headers: &str) -> PutInfo {
     let mut info = PutInfo {
         size: None,

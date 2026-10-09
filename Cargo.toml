@@ -40,6 +40,7 @@ embassy-time = {
   features = ["tick-hz-1_000", "generic-queue-32"]
 }
 embedded-io = "0.7"
+embedded-io-async = "0.7"
 getrandom = {
   version = "0.4",
   default-features = false

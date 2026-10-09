@@ -1,13 +1,15 @@
-#![allow(unused)]
 use core::{
     alloc,
+    cell::RefCell,
     net::{Ipv4Addr, SocketAddrV4},
 };
 
 use bytemuck::pod_align_to;
-use embassy_time::Instant;
-use heapless::Vec;
+use embassy_time::{Instant, Timer};
+use heapless::{HistoryBuf, Vec};
+use rand::{RngExt, rngs::SmallRng};
 use serde::{Deserialize, Serialize};
+use static_cell::ConstStaticCell;
 use uuid::Uuid;
 
 use crate::service::Vfs;
@@ -20,13 +22,13 @@ const MAX_JOBS: usize = 32;
 /// owns it.
 #[derive(Debug, Clone)]
 pub(crate) struct OwnedLedger {
-    pub owner: SocketAddrV4,
+    pub owner: Ipv4Addr,
     jobs: Vec<Uuid, MAX_JOBS>,
     pub updated: Instant,
 }
 
 impl OwnedLedger {
-    pub fn new(owner: SocketAddrV4) -> Self {
+    pub fn new(owner: Ipv4Addr) -> Self {
         Self {
             owner,
             jobs: Vec::new(),
@@ -89,7 +91,7 @@ impl OwnedLedger {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SharedLedger<'a> {
-    pub owner: SocketAddrV4,
+    pub owner: Ipv4Addr,
     #[serde(borrow, with = "uuid_slice")]
     jobs: &'a [Uuid],
 }
@@ -164,58 +166,108 @@ pub struct Message<'a> {
     pub payload: Payload<'a>,
 }
 
-impl<'a> Message<'a> {
-    pub async fn send_heartbeat<U: UdpSocket>(udp: &U) -> Result<(), U::Error> {
+type Type = Uuid;
+
+pub struct MessageManager<U>
+where
+    U: UdpSocket,
+{
+    udp: U,
+    history: RefCell<HistoryBuf<Uuid, 16>>,
+}
+
+impl<U> MessageManager<U>
+where
+    U: UdpSocket,
+{
+    pub fn new(udp: U) -> Self {
+        Self {
+            udp,
+            history: RefCell::new(HistoryBuf::new()),
+        }
+    }
+
+    pub async fn receive<'a>(&self, buf: &'a mut [u8]) -> Option<(SocketAddrV4, Message<'a>)> {
+        // TODO. better logging
+        let mut history = self.history.borrow_mut();
+        let Ok((remote, packet)) = self.udp.receive(buf).await else {
+            return None;
+        };
+
+        let Ok(msg) = postcard::from_bytes::<Message>(packet) else {
+            return None;
+        };
+
+        if history.contains(&msg.idempotency) {
+            return None;
+        }
+
+        history.write(msg.idempotency);
+        Some((remote, msg))
+    }
+
+    pub async fn send_heartbeat(&self) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
-        let msg = Self {
+        let msg = Message {
             idempotency,
             payload: Payload::Heartbeat("HB"),
         };
-        msg.send(udp).await
+        if let Ok(packet) = postcard::to_slice(&msg, &mut [0u8; 1024]) {
+            self.udp.send(BROADCAST_ADDR, packet).await?;
+        }
+        Ok(())
     }
 
-    pub async fn send_share<U: UdpSocket>(
-        share: SharedLedger<'a>,
-        udp: &U,
-    ) -> Result<(), U::Error> {
+    pub async fn send_share(&self, share: SharedLedger<'_>) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
-        let msg = Self {
+        let msg = Message {
             idempotency,
             payload: Payload::Ledger(share),
         };
-        Self::send(&msg, udp).await
+        if let Ok(packet) = postcard::to_slice(&msg, &mut [0u8; 1024]) {
+            self.udp.send(BROADCAST_ADDR, packet).await?;
+        }
+        Ok(())
     }
 
-    pub async fn send_gcode<U: UdpSocket>(gcode: SharedGcode<'a>, udp: &U) -> Result<(), U::Error> {
+    pub async fn send_gcode(&self, gcode: SharedGcode<'_>) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
-        let msg = Self {
+        let msg = Message {
             idempotency,
             payload: Payload::Gcode(gcode),
         };
-        Self::send(&msg, udp).await
+        if let Ok(packet) = postcard::to_slice(&msg, &mut [0u8; 1024]) {
+            self.udp.send(BROADCAST_ADDR, packet).await?;
+            let mut rng: SmallRng = rand::make_rng();
+            let jitter: u64 = rng.random_range(50..=150);
+            Timer::after_millis(jitter).await;
+            self.udp.send(BROADCAST_ADDR, packet).await?;
+        }
+        Ok(())
     }
 
-    pub async fn send_new_job<U: UdpSocket>(guid: Uuid, udp: &U) -> Result<(), U::Error> {
+    pub async fn send_new_job(&self, guid: Uuid) -> Result<(), U::Error> {
         let idempotency = Uuid::new_v4();
-        let msg = Self {
+        let msg = Message {
             idempotency,
             payload: Payload::NewJob(guid),
         };
-        Self::send(&msg, udp).await
+        if let Ok(packet) = postcard::to_slice(&msg, &mut [0u8; 1024]) {
+            self.udp.send(BROADCAST_ADDR, packet).await?;
+        }
+        Ok(())
     }
 
-    pub async fn send_log<U: UdpSocket>(msg: &'a str, udp: &U) -> Result<(), U::Error> {
+    pub async fn send_log(&self, fargs: core::fmt::Arguments<'_>) -> Result<(), U::Error> {
+        // TODO. fix this
+        let msg = heapless::format!(128; "{}", fargs).unwrap();
         let idempotency = Uuid::new_v4();
-        let msg = Self {
+        let msg = Message {
             idempotency,
-            payload: Payload::Log(msg),
+            payload: Payload::Log(&msg),
         };
-        Self::send(&msg, udp).await
-    }
-
-    async fn send<U: UdpSocket>(&self, udp: &U) -> Result<(), U::Error> {
-        if let Ok(packet) = postcard::to_slice(self, &mut [0u8; 1024]) {
-            udp.send(BROADCAST_ADDR, packet).await?;
+        if let Ok(packet) = postcard::to_slice(&msg, &mut [0u8; 512]) {
+            self.udp.send(BROADCAST_ADDR, packet).await?;
         }
         Ok(())
     }
