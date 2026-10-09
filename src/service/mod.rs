@@ -40,20 +40,39 @@ where
     Self: Sized,
 {
     type Error: core::error::Error;
+
     fn new() -> Result<Self, Self::Error>;
+
     fn bind(
         self,
         socket: SocketAddrV4,
     ) -> impl Future<Output = Result<(SocketAddrV4, Self), Self::Error>>;
+
     fn receive<'a>(
         &self,
         buf: &'a mut [u8],
     ) -> impl Future<Output = Result<(SocketAddrV4, &'a [u8]), Self::Error>>;
+
     fn send(
         &self,
         remote: SocketAddrV4,
         buf: &[u8],
     ) -> impl Future<Output = Result<usize, Self::Error>>;
+
+    #[allow(unused)]
+    fn send_all(
+        &self,
+        remote: SocketAddrV4,
+        mut buf: &[u8],
+    ) -> impl Future<Output = Result<(), Self::Error>> {
+        async move {
+            while !buf.is_empty() {
+                let n = self.send(remote, buf).await?;
+                buf = &buf[n..];
+            }
+            Ok(())
+        }
+    }
 }
 
 pub trait TcpStream
@@ -67,23 +86,33 @@ where
     fn write(&self, buf: &[u8]) -> impl Future<Output = Result<usize, Self::Error>>;
     fn finish(&self) -> impl Future<Output = Result<(), Self::Error>>;
 
+    fn write_all(&self, mut buf: &[u8]) -> impl Future<Output = Result<(), Self::Error>> {
+        async move {
+            while !buf.is_empty() {
+                let n = self.write(buf).await?;
+                buf = &buf[n..];
+            }
+            Ok(())
+        }
+    }
+
     fn pong(&self) -> impl Future<Output = Result<(), Self::Error>> {
         async {
-            self.write(PONG.as_bytes()).await?;
+            self.write_all(PONG.as_bytes()).await?;
             self.finish().await
         }
     }
 
     fn bad_request(&self) -> impl Future<Output = Result<(), Self::Error>> {
         async {
-            self.write(BAD_REQUEST.as_bytes()).await?;
+            self.write_all(BAD_REQUEST.as_bytes()).await?;
             self.finish().await
         }
     }
 
     fn internal_server_error(&self) -> impl Future<Output = Result<(), Self::Error>> {
         async {
-            self.write(INTERNAL_SERVER_ERROR.as_bytes()).await?;
+            self.write_all(INTERNAL_SERVER_ERROR.as_bytes()).await?;
             self.finish().await
         }
     }
@@ -252,7 +281,7 @@ where
                         && let Ok(t) = FileTransfer::<V>::new(&gcode).await
                     {
                         let fargs =
-                            format_args!("Transfer Recv Start: {}", self.platform.local().unwrap());
+                            format_args!("Transfer Recv Start: {:?}", self.platform.local());
                         let _ = self.messenger.send_log(fargs).await;
                         transfer = Some(t);
                         continue;
@@ -455,11 +484,12 @@ where
 
                     // Continue reading bytes.
                     let mut more_data_needed = true;
+                    let mut failed = false;
                     loop {
                         let Ok(data) = stream.read(&mut buf).await else {
                             self.platform.log(format_args!("TCP stream read err"));
-                            let _ = stream.internal_server_error().await;
-                            continue;
+                            failed = true;
+                            break;
                         };
                         if data.is_empty() {
                             break;
@@ -471,6 +501,17 @@ where
                             more_data_needed = false;
                             break;
                         }
+                    }
+
+                    // If the tcp failed during reading.
+                    if failed {
+                        let _ = fil.flush();
+                        fil.close();
+                        let _ = V::delete(&partial_path).await;
+                        if stream.internal_server_error().await.is_err() {
+                            self.platform.log(format_args!("TCP stream write err"));
+                        };
+                        continue;
                     }
 
                     // The stream did not give us enough data
@@ -537,6 +578,7 @@ where
                 chunk_id: 0,
                 last_chunk: false,
                 data: [0u8; 768],
+                len: 768,
             };
             loop {
                 let Ok(res) = fil.read(&mut chunk.data) else {
@@ -546,6 +588,7 @@ where
                 if res < chunk.data.len() {
                     // EOF
                     chunk.last_chunk = true;
+                    chunk.len = res;
                     let _ = self.messenger.send_gcode(chunk.share()).await;
                     break;
                 }

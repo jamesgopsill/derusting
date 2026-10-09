@@ -4,7 +4,9 @@ use embassy_executor::{Spawner, raw};
 
 use crate::{
     DRIVER,
-    free_rtos::bindings::{BaseType_t, xTaskGenericNotify, xTaskGenericNotifyFromISR},
+    free_rtos::bindings::{
+        BaseType_t, TaskHandle_t, xTaskGenericNotify, xTaskGenericNotifyFromISR,
+    },
     log_info,
 };
 
@@ -51,7 +53,7 @@ pub fn __pender(context: *mut c_void) {
     if context.is_null() {
         return;
     }
-    let task_handle = context as *mut BaseType_t;
+    let task_handle = context as TaskHandle_t;
 
     // Determine if we're in an interrupt or non-interrupt state.
     let ipsr: u32;

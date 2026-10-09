@@ -9,7 +9,7 @@ use critical_section::Mutex as CsMutex;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
 use embassy_time_queue_utils::Queue;
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 
 use crate::free_rtos::{
     bindings::{pvParameters, vTaskDelay, xTaskGetCurrentTaskHandle},
@@ -18,6 +18,7 @@ use crate::free_rtos::{
     time_driver::FreeRtosTimeDriver,
 };
 
+mod errno;
 mod free_rtos;
 mod log;
 mod lwip;
@@ -42,11 +43,17 @@ static EXECUTOR: StaticCell<FreeRtosTaskExecutor> = StaticCell::new();
 /// We only need a small stack to hold the executor. The
 /// embassy task macro provides the stack memory required
 /// for each embassy task
-const STACK_BYTES: usize = 1024 * 6; // / 4 for u32 stack words
-// #[unsafe(link_section = ".ccmram")]
-static mut RTOS_STACK: [u8; STACK_BYTES] = [0u8; STACK_BYTES];
-// #[unsafe(link_section = ".ccmram")]
-static mut RTOS_TCB: [u8; 128] = [0u8; 128];
+///
+#[repr(C, align(8))]
+pub struct Aligned<T>(pub T);
+
+const STACK_WORDS: usize = 1024 * 6;
+const TCB_BYTES: usize = 128;
+
+static RTOS_STACK: ConstStaticCell<Aligned<[u8; STACK_WORDS]>> =
+    ConstStaticCell::new(Aligned([0; STACK_WORDS]));
+static RTOS_TCB: ConstStaticCell<Aligned<[u8; TCB_BYTES]>> =
+    ConstStaticCell::new(Aligned([0; TCB_BYTES]));
 
 /// # Safety
 /// We will ensure that we call this function in an
@@ -59,15 +66,15 @@ static mut RTOS_TCB: [u8; 128] = [0u8; 128];
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn derusting_main() {
     log_info!("derusting_main()");
-    // SAFETY: not yet borrowed elsewhere and, per the fn-level Safety note,
-    // this function runs at most once, so this is the only live reference
-    // to `RTOS_STACK`.
-    #[allow(static_mut_refs)]
-    let stack = unsafe { RTOS_STACK.as_mut_slice() };
-    // SAFETY: same reasoning as `RTOS_STACK` above, for `RTOS_TCB`.
-    #[allow(static_mut_refs)]
-    let tcb = unsafe { RTOS_TCB.as_mut_slice() };
-    let _ = Task::new_static(c"Embassy", embassy, 1, stack, tcb);
+    let stack = RTOS_STACK.take();
+    let tcb = RTOS_TCB.take();
+    let _ = Task::new_static(
+        c"Embassy",
+        embassy,
+        1,
+        stack.0.as_mut_slice(),
+        tcb.0.as_mut_slice(),
+    );
 }
 
 /// Our FreeRTOS Embassy Task that spawns and never returns.

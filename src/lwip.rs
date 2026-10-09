@@ -340,7 +340,7 @@ impl crate::service::TcpStream for TcpStream {
                 break;
             }
             let err = Error::last();
-            if err.would_block() {
+            if !err.would_block() {
                 return Err(err);
             }
             Timer::after_millis(10).await;

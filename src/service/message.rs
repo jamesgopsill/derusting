@@ -107,6 +107,7 @@ pub struct OwnedGcode {
     pub chunk_id: u32,
     pub last_chunk: bool,
     pub data: [u8; 768],
+    pub len: usize,
 }
 
 impl OwnedGcode {
@@ -115,7 +116,7 @@ impl OwnedGcode {
             guid: self.guid,
             chunk_id: self.chunk_id,
             last_chunk: self.last_chunk,
-            data: &self.data,
+            data: &self.data[..self.len],
         }
     }
 }

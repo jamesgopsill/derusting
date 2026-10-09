@@ -36,6 +36,10 @@ where
         if gcode.guid != self.guid {
             return Ok(Some(self));
         }
+        // Duplicate packet that may have slipped through.
+        if gcode.chunk_id == self.id {
+            return Ok(Some(self));
+        }
         // If it is not the next increment delete
         if gcode.chunk_id != self.id + 1 {
             let fil = self.fil;

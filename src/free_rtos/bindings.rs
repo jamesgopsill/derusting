@@ -1,26 +1,41 @@
 #![allow(unused, non_camel_case_types)]
-use core::ffi::{c_char, c_void};
+use core::{
+    ffi::{c_char, c_long, c_void},
+    marker::{PhantomData, PhantomPinned},
+};
 
-/// Opaque handle type for a FreeRTOS task, as returned by e.g.
-/// `xTaskCreate`/`xTaskCreateStatic`.
-pub type BaseType_t = c_void;
+pub type BaseType_t = i32;
 /// Opaque pointer type for the argument passed to a task's entry function.
 pub type pvParameters = c_void;
 /// The entry-point signature FreeRTOS expects for a task function.
 pub type TaskFunction_t = unsafe extern "C" fn(*mut pvParameters) -> !;
+#[repr(C)]
+pub struct tskTaskControlBlock {
+    _data: [u8; 0],
+    _marker: PhantomData<(*mut u8, PhantomPinned)>,
+}
+pub type TaskHandle_t = *mut tskTaskControlBlock;
 
 /// Error codes returned by our FreeRTOS task-creation bindings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[repr(i32)]
-pub enum FreeRtosError {
-    #[error("Insufficient Heap Memory.")]
-    InsufficientHeapMemory = -1,
-    #[error("Generic Failure.")]
-    GenericFailure = 0,
-    #[error("Unknown")]
-    Unknown = -99,
-    #[error("OK")]
-    Ok = 1,
+#[derive(Debug)]
+pub struct Error(i32);
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl core::error::Error for Error {}
+
+impl Error {
+    pub fn new(code: i32) -> Self {
+        Self(code)
+    }
+
+    pub fn check(rc: i32) -> Result<(), Self> {
+        if (rc == 1) { Ok(()) } else { Err(Self(rc)) }
+    }
 }
 
 // SAFETY (whole block): these are raw FreeRTOS kernel entry points. Unless
@@ -32,29 +47,29 @@ pub enum FreeRtosError {
 // per-function below.
 unsafe extern "C" {
     /// Delete a FreeRTOS task.
-    pub fn vTaskDelete(task: *mut BaseType_t);
+    pub fn vTaskDelete(task: *mut i32);
 
     /// Notify a task to make progress outside of an interrupt.
     pub fn xTaskGenericNotify(
-        task: *mut BaseType_t,
+        task: TaskHandle_t,
         index: u32, // index to notify (usually 0)
         ul_value: u32,
         action: u32, // eNotifyAction (2 = eIncrement)
         previous_notification: *mut u32,
-    ) -> i32;
+    ) -> BaseType_t;
 
     /// Notify a task to make progress when in an interrupt context.
     /// Must only be called from within an ISR (use `xTaskGenericNotify`
     /// otherwise); `pxHigherPriorityTaskWoken` must point to a valid,
     /// writable `i32`.
     pub fn xTaskGenericNotifyFromISR(
-        task: *mut c_void,
+        task: TaskHandle_t,
         index: u32,
         ul_value: u32,
         action: u32,
         previous_notification: *mut u32,
         pxHigherPriorityTaskWoken: *mut i32,
-    ) -> i32;
+    ) -> BaseType_t;
 
     /// Wait a specified time or notification to make progress.
     pub fn ulTaskGenericNotifyTake(
@@ -64,23 +79,7 @@ unsafe extern "C" {
     ) -> u32;
 
     /// Get a pointer to the current task.
-    pub fn xTaskGetCurrentTaskHandle() -> *mut BaseType_t;
-
-    /// Create a new FreeRTOS task.
-    pub fn xTaskCreate(
-        // Pointer to your extern "C" Rust function
-        px_task_code: TaskFunction_t,
-        // Name of the task
-        pc_name: *const c_char,
-        // Stack depth in words
-        us_stack_depth: u16,
-        // Arguments to be passed to the task
-        pv_parameters: *mut pvParameters,
-        // Task Priority
-        ux_priority: u32,
-        // Task Handle
-        px_created_task: *mut *mut BaseType_t,
-    ) -> FreeRtosError;
+    pub fn xTaskGetCurrentTaskHandle() -> TaskHandle_t;
 
     /// `stack_buf_ptr` must point to a buffer of at least
     /// `us_stack_depth * 4` bytes, and `tcb_buf_ptr` to a buffer sized for
@@ -104,13 +103,13 @@ unsafe extern "C" {
         stack_buf_ptr: *mut u8,
         // TCB buffer ~[0u8; 128]
         tcb_buf_ptr: *mut u8,
-    ) -> *mut BaseType_t;
+    ) -> TaskHandle_t;
 
     /// Delay a task.
     pub fn vTaskDelay(ticks: u32);
 
     /// Alloc some FreeRTOS managed heap memory.
-    pub fn pvPortMalloc(size: usize) -> *mut u8;
+    pub fn pvPortMalloc(size: usize) -> *mut c_void;
 
     /// Free some FreeRTOS managed heap memory.
     pub fn vPortFree(ptr: *mut u8);
@@ -128,5 +127,5 @@ unsafe extern "C" {
     pub fn xPortGetFreeHeapSize() -> usize;
 
     // Stack size
-    pub fn uxTaskGetStackHighWaterMark(task_handle: *mut BaseType_t) -> usize;
+    pub fn uxTaskGetStackHighWaterMark(xTask: TaskHandle_t) -> usize;
 }
